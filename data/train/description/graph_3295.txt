@@ -1,0 +1,1 @@
+In this graph, there are 42 nodes connected by 821 edges. On average, each node is connected to 39.095238095238095 other nodes. Within the graph, there are 10660 triangles, forming closed loops of nodes. The global clustering coefficient is 0.9987507807620237. Additionally, the graph has a maximum k-core of 40 and a number of communities equal to 2.

@@ -1,0 +1,1 @@
+This graph comprises 29 nodes and 98 edges. The average degree is equal to 6.758620689655173 and there are 62 triangles in the graph. The global clustering coefficient and the graph's maximum k-core are 0.2623413258110014 and 4 respectively. The graph consists of 5 communities.
