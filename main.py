@@ -38,6 +38,8 @@ Returns:
     argparse.Namespace: Parsed arguments as attributes for easy configuration of the model.
 """
 
+print("hello world")
+
 # Argument parser
 parser = argparse.ArgumentParser(description='NeuralGraphGenerator')
 
