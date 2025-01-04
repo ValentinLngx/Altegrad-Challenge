@@ -19,13 +19,30 @@ class Decoder(nn.Module):
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x):
+    def forward(self, x, n_edges_enforce=None):
         for i in range(self.n_layers-1):
             x = self.relu(self.mlp[i](x))
         
         x = self.mlp[self.n_layers-1](x)
         x = torch.reshape(x, (x.size(0), -1, 2))
-        x = F.gumbel_softmax(x, tau=1, hard=True)[:,:,0]
+        
+        probs = F.softmax(x, dim=-1)
+        p_edge = probs[:, :, 1]
+
+        if n_edges_enforce is not None:
+            batch_size = p_edge.size(0)
+            top_edges = []
+            for b in range(batch_size):
+                # Sort edges by probability (descending)
+                sorted_vals, sorted_idx = torch.sort(p_edge[b], descending=True)
+                mask = torch.zeros_like(p_edge[b])
+                k = min(n_edges_enforce, p_edge.size(1))
+                mask[sorted_idx[:k]] = 1.0
+                top_edges.append(mask)
+            x = torch.stack(top_edges, dim=0)
+        else:
+            # If we don't enforce edges, do the old Gumbel or Argmax logic
+            x = F.gumbel_softmax(x, tau=1.0, hard=True)[:, :, 0]
 
         adj = torch.zeros(x.size(0), self.n_nodes, self.n_nodes, device=x.device)
         idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
