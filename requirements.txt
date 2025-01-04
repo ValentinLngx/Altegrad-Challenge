@@ -135,3 +135,8 @@ wheel==0.44.0
 win_inet_pton==1.1.0
 yaml==0.2.5
 yarl==1.18.0
+scipy~=1.13.1
+numpy~=1.26.4
+tqdm~=4.66.6
+community~=1.0.0b1
+grakel~=0.1.10
