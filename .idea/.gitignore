@@ -1,6 +1,9 @@
 # Default ignored files
 /shelf/
 /workspace.xml
+/data/dataset_test.pt
+/data/dataset_train.pt
+/data/dataset_valid.pt
 # Editor-based HTTP Client requests
 /httpRequests/
 # Datasource local storage ignored files

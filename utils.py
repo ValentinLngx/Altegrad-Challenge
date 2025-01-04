@@ -107,7 +107,7 @@ def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim):
                 diags = np.squeeze(np.asarray(diags))
                 D = sparse.diags(diags).toarray()
                 L = D - adj_bfs
-                with sp.errstate(divide="ignore"):
+                with np.errstate(divide="ignore"):
                     diags_sqrt = 1.0 / np.sqrt(diags)
                 diags_sqrt[np.isinf(diags_sqrt)] = 0
                 DH = sparse.diags(diags).toarray()
