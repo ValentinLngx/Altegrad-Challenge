@@ -4,6 +4,9 @@ import torch.nn.functional as F
 
 from torch_geometric.nn import GINConv
 from torch_geometric.nn import global_add_pool
+from torch_geometric.nn import GCNConv, GINConv, global_mean_pool
+from torch_geometric.nn import DenseGCNConv, dense_diff_pool
+from torch_geometric.nn import GATConv, global_mean_pool
 
 # Decoder
 class Decoder(nn.Module):
@@ -146,3 +149,70 @@ class VariationalAutoEncoder(nn.Module):
         loss = recon + beta*kld
 
         return loss, recon, kld
+
+
+class GlobalEncoder(nn.Module):
+    def __init__(self, in_channels, hidden_dim, num_nodes, assign_ratio=0.25):
+        """
+        Example global encoder using DiffPool.
+        - in_channels: dimension of node features.
+        - hidden_dim: dimension of hidden layers.
+        - num_nodes: maximum number of nodes in the graph (for DenseDiffPool).
+        - assign_ratio: ratio of nodes to pool to.
+        """
+        super(GlobalEncoder, self).__init__()
+
+        # Dense Convs for DiffPool
+        self.gconv1 = DenseGCNConv(in_channels, hidden_dim)
+        self.gconv2 = DenseGCNConv(hidden_dim, hidden_dim)
+
+        # Assignment network
+        self.assign_conv1 = DenseGCNConv(in_channels, hidden_dim)
+        self.assign_conv2 = DenseGCNConv(hidden_dim, int(num_nodes * assign_ratio))
+
+        self.hidden_dim = hidden_dim
+
+    def forward(self, x, adj):
+        """
+        x: Dense node feature matrix [batch_size, num_nodes, in_channels]
+        adj: Dense adjacency matrix [batch_size, num_nodes, num_nodes]
+        """
+        # DiffPool requires dense adjacency, so be sure to use e.g. to_dense_batch if needed
+
+        # Feature GCN forward pass
+        s = F.relu(self.gconv1(x, adj))
+        s = F.relu(self.gconv2(s, adj))
+
+        # Assignment matrix forward pass
+        a = F.relu(self.assign_conv1(x, adj))
+        a = F.relu(self.assign_conv2(a, adj))
+
+        # Now pool
+        inter = dense_diff_pool(s, adj, a)
+        x_pooled = inter[0]
+        adj_pooled = inter[1]
+        # x_pooled is [batch_size, num_clusters, hidden_dim]
+        # For simplicity, do a mean pool across clusters -> single vector per graph
+        x_global = x_pooled.mean(dim=1)  # shape [batch_size, hidden_dim]
+        return x_global
+
+
+class LocalEncoder(nn.Module):
+    def __init__(self, in_channels, hidden_dim):
+        super(LocalEncoder, self).__init__()
+        self.gat1 = GATConv(in_channels, hidden_dim, heads=1)
+        self.gat2 = GATConv(hidden_dim, hidden_dim, heads=1)
+        self.hidden_dim = hidden_dim
+
+    def forward(self, x, edge_index, batch):
+        """
+        x: node features in sparse format [num_nodes, in_channels]
+        edge_index: [2, num_edges]
+        batch: batch assignments for each node
+        """
+        x = F.elu(self.gat1(x, edge_index))
+        x = F.elu(self.gat2(x, edge_index))
+
+        # Pool per-graph to get a single embedding (or a substructure embedding)
+        x_local = global_mean_pool(x, batch)  # shape [num_graphs, hidden_dim]
+        return x_local
