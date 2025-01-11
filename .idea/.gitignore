@@ -4,6 +4,7 @@
 /data/dataset_test.pt
 /data/dataset_train.pt
 /data/dataset_valid.pt
+/output.csv
 # Editor-based HTTP Client requests
 /httpRequests/
 # Datasource local storage ignored files

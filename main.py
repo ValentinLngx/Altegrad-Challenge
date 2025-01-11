@@ -139,7 +139,7 @@ if args.train_autoencoder:
         for data in train_loader:
             data = data.to(device)
             optimizer.zero_grad()
-            loss, recon, kld  = autoencoder.loss_function(data)
+            loss, recon, kld  = autoencoder.loss_function(data, data.stats)
             train_loss_all_recon += recon.item()
             train_loss_all_kld += kld.item()
             cnt_train+=1
@@ -157,7 +157,7 @@ if args.train_autoencoder:
 
         for data in val_loader:
             data = data.to(device)
-            loss, recon, kld  = autoencoder.loss_function(data)
+            loss, recon, kld  = autoencoder.loss_function(data, data.stats)
             val_loss_all_recon += recon.item()
             val_loss_all_kld += kld.item()
             val_loss_all += loss.item()
