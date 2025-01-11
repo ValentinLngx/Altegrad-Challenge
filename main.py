@@ -45,7 +45,7 @@ parser.add_argument('--dropout', type=float, default=0.0)
 parser.add_argument('--batch-size', type=int, default=256)
 
 # Number of epochs for autoencoder training
-parser.add_argument('--epochs-autoencoder', type=int, default=5)
+parser.add_argument('--epochs-autoencoder', type=int, default=300)
 
 # Hidden dimension sizes
 parser.add_argument('--hidden-dim-encoder', type=int, default=64)
@@ -62,7 +62,7 @@ parser.add_argument('--n-layers-encoder', type=int, default=2)
 parser.add_argument('--n-layers-decoder', type=int, default=3)
 
 # Spectral embedding dimension
-parser.add_argument('--spectral-emb-dim', type=int, default=10)
+parser.add_argument('--spectral-emb-dim', type=int, default=150)
 
 # Number of training epochs for the denoising model
 parser.add_argument('--epochs-denoise', type=int, default=11)
