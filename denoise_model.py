@@ -28,7 +28,8 @@ def p_losses(denoise_model, x_start, t, cond, sqrt_alphas_cumprod, sqrt_one_minu
         noise = torch.randn_like(x_start)
 
     x_noisy = q_sample(x_start, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=noise)
-    predicted_noise = denoise_model(x_noisy, t, cond)
+    x_noisy_input = x_noisy.unsqueeze(1)
+    predicted_noise = denoise_model(x_noisy_input, t, cond).squeeze(1)
 
     if loss_type == 'l1':
         loss = F.l1_loss(noise, predicted_noise)
@@ -121,10 +122,12 @@ def p_sample(model, x, t, cond, t_index, betas):
     )
     sqrt_recip_alphas_t = extract(sqrt_recip_alphas, t, x.shape)
 
-    # Equation 11 in the paper
-    # Use our model (noise predictor) to predict the mean
+    x_input = x.unsqueeze(1)
+    predicted_noise = model(x_input, t, cond)  # Will be [batch_size, 1, latent_dim]
+    predicted_noise = predicted_noise.squeeze(1)  # Convert back to [batch_size, latent_dim] for the rest of the calculations
+    
     model_mean = sqrt_recip_alphas_t * (
-        x - betas_t * model(x, t, cond) / sqrt_one_minus_alphas_cumprod_t
+        x - betas_t * predicted_noise / sqrt_one_minus_alphas_cumprod_t
     )
 
     if t_index == 0:
@@ -156,3 +159,114 @@ def p_sample_loop(model, cond, timesteps, betas, shape):
 @torch.no_grad()
 def sample(model, cond, latent_dim, timesteps, betas, batch_size):
     return p_sample_loop(model, cond, timesteps, betas, shape=(batch_size, latent_dim))
+
+
+class CrossAttention(nn.Module):
+    def __init__(self, query_dim, context_dim, n_heads=4, d_head=64):
+        super().__init__()
+        self.scale = d_head ** -0.5
+        self.n_heads = n_heads
+        inner_dim = d_head * n_heads
+        
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_out = nn.Linear(inner_dim, query_dim)
+        
+    def forward(self, x, context):
+        q = self.to_q(x)
+        k = self.to_k(context)
+        v = self.to_v(context)
+        
+        q, k, v = map(lambda t: t.view(*t.shape[:-1], self.n_heads, -1), (q, k, v))
+        q, k, v = map(lambda t: t.transpose(-2, -3), (q, k, v))
+        
+        attention = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        attention = F.softmax(attention, dim=-1)
+        
+        out = torch.matmul(attention, v)
+        out = out.transpose(-2, -3).contiguous()
+        out = out.view(*out.shape[:-2], -1)
+        return self.to_out(out)
+
+class ImprovedDenoiseNN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, n_layers, n_cond, d_cond):
+        super().__init__()
+        self.n_layers = n_layers
+        self.n_cond = n_cond
+        
+        # Enhanced condition processing
+        self.cond_mlp = nn.Sequential(
+            nn.Linear(n_cond, d_cond),
+            nn.LayerNorm(d_cond),
+            nn.SiLU(),
+            nn.Linear(d_cond, d_cond),
+            nn.LayerNorm(d_cond),
+            nn.SiLU(),
+        )
+        
+        # Time embedding
+        self.time_mlp = nn.Sequential(
+            SinusoidalPositionEmbeddings(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        
+        # Cross attention layers for better conditioning
+        self.attention_layers = nn.ModuleList([
+            CrossAttention(hidden_dim, d_cond)
+            for _ in range(n_layers)
+        ])
+        
+        # Main processing layers
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.blocks = nn.ModuleList([
+            nn.ModuleDict({
+                'block': nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.SiLU(),
+                ),
+                'time_proj': nn.Linear(hidden_dim, hidden_dim),
+                'cond_proj': nn.Linear(d_cond, hidden_dim)
+            })
+            for _ in range(n_layers)
+        ])
+        
+        self.final_proj = nn.Linear(hidden_dim, input_dim)
+        
+    def forward(self, x, t, cond):
+        # Process condition
+        cond = torch.nan_to_num(cond, nan=-100.0)
+        cond = self.cond_mlp(cond)
+        
+        # Process time embedding
+        t = self.time_mlp(t)
+        
+        # Initial projection - maintain the middle dimension
+        h = self.input_proj(x)  # x is [batch_size, 1, input_dim]
+        
+        # Main processing with attention and residual connections
+        for i in range(self.n_layers):
+            residual = h
+            
+            # Apply main block
+            h = self.blocks[i]['block'](h)
+            
+            # Add time embedding
+            time_emb = self.blocks[i]['time_proj'](t)
+            h = h + time_emb.unsqueeze(1)
+            
+            # Apply cross attention with condition
+            h = self.attention_layers[i](h, cond.unsqueeze(1))
+            
+            # Add condition projection
+            cond_emb = self.blocks[i]['cond_proj'](cond)
+            h = h + cond_emb.unsqueeze(1)
+            
+            # Add residual
+            h = h + residual
+        
+        # Final projection while maintaining shape [batch_size, 1, input_dim]
+        return self.final_proj(h)  # Returns [batch_size, 1, input_dim]

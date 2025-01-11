@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 
 from autoencoder import VariationalAutoEncoder
-from denoise_model import DenoiseNN, p_losses, sample
+from denoise_model import DenoiseNN, p_losses, sample, ImprovedDenoiseNN
 from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
 
 
@@ -38,68 +38,65 @@ Returns:
     argparse.Namespace: Parsed arguments as attributes for easy configuration of the model.
 """
 
-# Argument parser
-parser = argparse.ArgumentParser(description='NeuralGraphGenerator')
-
-# Argument parser for configuring the NeuralGraphGenerator model
 parser = argparse.ArgumentParser(description='Configuration for the NeuralGraphGenerator model')
 
-# Learning rate for the optimizer
-parser.add_argument('--lr', type=float, default=1e-3, help="Learning rate for the optimizer, typically a small float value (default: 0.001)")
+# Learning rate
+parser.add_argument('--lr', type=float, default=5e-5) 
 
 # Dropout rate
-parser.add_argument('--dropout', type=float, default=0.0, help="Dropout rate (fraction of nodes to drop) to prevent overfitting (default: 0.0)")
+parser.add_argument('--dropout', type=float, default=0.0)
 
 # Batch size for training
-parser.add_argument('--batch-size', type=int, default=256, help="Batch size for training, controlling the number of samples per gradient update (default: 256)")
+parser.add_argument('--batch-size', type=int, default=256)
 
-# Number of epochs for the autoencoder training
-parser.add_argument('--epochs-autoencoder', type=int, default=200, help="Number of training epochs for the autoencoder (default: 200)")
+# Number of epochs for autoencoder training
+parser.add_argument('--epochs-autoencoder', type=int, default=200)
 
-# Hidden dimension size for the encoder network
-parser.add_argument('--hidden-dim-encoder', type=int, default=64, help="Hidden dimension size for encoder layers (default: 64)")
+# Hidden dimension sizes
+parser.add_argument('--hidden-dim-encoder', type=int, default=64)
+parser.add_argument('--hidden-dim-decoder', type=int, default=256)
 
-# Hidden dimension size for the decoder network
-parser.add_argument('--hidden-dim-decoder', type=int, default=256, help="Hidden dimension size for decoder layers (default: 256)")
+# Latent dimension
+parser.add_argument('--latent-dim', type=int, default=32)
 
-# Dimensionality of the latent space
-parser.add_argument('--latent-dim', type=int, default=32, help="Dimensionality of the latent space in the autoencoder (default: 32)")
+# Max number of nodes
+parser.add_argument('--n-max-nodes', type=int, default=50)
 
-# Maximum number of nodes of graphs
-parser.add_argument('--n-max-nodes', type=int, default=50, help="Possible maximum number of nodes in graphs (default: 50)")
+# Number of layers for encoder/decoder
+parser.add_argument('--n-layers-encoder', type=int, default=2)
+parser.add_argument('--n-layers-decoder', type=int, default=3)
 
-# Number of layers in the encoder network
-parser.add_argument('--n-layers-encoder', type=int, default=2, help="Number of layers in the encoder network (default: 2)")
-
-# Number of layers in the decoder network
-parser.add_argument('--n-layers-decoder', type=int, default=3, help="Number of layers in the decoder network (default: 3)")
-
-# Dimensionality of spectral embeddings for graph structure representation
-parser.add_argument('--spectral-emb-dim', type=int, default=10, help="Dimensionality of spectral embeddings for representing graph structures (default: 10)")
+# Spectral embedding dimension
+parser.add_argument('--spectral-emb-dim', type=int, default=10)
 
 # Number of training epochs for the denoising model
-parser.add_argument('--epochs-denoise', type=int, default=100, help="Number of training epochs for the denoising model (default: 100)")
+parser.add_argument('--epochs-denoise', type=int, default=100)
 
 # Number of timesteps in the diffusion
-parser.add_argument('--timesteps', type=int, default=500, help="Number of timesteps for the diffusion (default: 500)")
+parser.add_argument('--timesteps', type=int, default=500)
 
-# Hidden dimension size for the denoising model
-parser.add_argument('--hidden-dim-denoise', type=int, default=512, help="Hidden dimension size for denoising model layers (default: 512)")
+# Hidden dimension for denoising model
+parser.add_argument('--hidden-dim-denoise', type=int, default=512)
 
-# Number of layers in the denoising model
-parser.add_argument('--n-layers_denoise', type=int, default=3, help="Number of layers in the denoising model (default: 3)")
+# Number of layers for denoising model
+parser.add_argument('--n-layers_denoise', type=int, default=3)
 
-# Flag to toggle training of the autoencoder (VGAE)
-parser.add_argument('--train-autoencoder', action='store_false', default=True, help="Flag to enable/disable autoencoder (VGAE) training (default: enabled)")
+# Flags for training
+parser.add_argument('--train-autoencoder', action='store_false', default=True)
+parser.add_argument('--train-denoiser', action='store_true', default=True)
 
-# Flag to toggle training of the diffusion-based denoising model
-parser.add_argument('--train-denoiser', action='store_true', default=True, help="Flag to enable/disable denoiser training (default: enabled)")
+# Conditioning dimension
+parser.add_argument('--dim-condition', type=int, default=128)
+parser.add_argument('--n-condition', type=int, default=7)
 
-# Dimensionality of conditioning vectors for conditional generation
-parser.add_argument('--dim-condition', type=int, default=128, help="Dimensionality of conditioning vectors for conditional generation (default: 128)")
+# Optional: clamp gamma to 0 if you suspect property loss is causing NaNs
+parser.add_argument('--gamma', type=float, default=0.0, 
+                    help="Weight for property matching loss; set to 0 at first to avoid NaNs")
 
-# Number of conditions used in conditional vector (number of properties)
-parser.add_argument('--n-condition', type=int, default=7, help="Number of distinct condition properties used in conditional vector (default: 7)")
+# Beta for KL term
+parser.add_argument('--beta', type=float, default=0.05, 
+                    help="KL term weight in the VAE loss")
+
 
 args = parser.parse_args()
 
@@ -201,7 +198,13 @@ sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
 posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 
 # initialize denoising model
-denoise_model = DenoiseNN(input_dim=args.latent_dim, hidden_dim=args.hidden_dim_denoise, n_layers=args.n_layers_denoise, n_cond=args.n_condition, d_cond=args.dim_condition).to(device)
+denoise_model = ImprovedDenoiseNN(
+    input_dim=args.latent_dim,
+    hidden_dim=args.hidden_dim_denoise,
+    n_layers=args.n_layers_denoise,
+    n_cond=args.n_condition,
+    d_cond=args.dim_condition
+).to(device)
 optimizer = torch.optim.Adam(denoise_model.parameters(), lr=args.lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
 
@@ -217,8 +220,23 @@ if args.train_denoiser:
             optimizer.zero_grad()
             x_g = autoencoder.encode(data)
             t = torch.randint(0, args.timesteps, (x_g.size(0),), device=device).long()
-            loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, loss_type="huber")
+            loss = p_losses(
+                denoise_model,
+                x_g,
+                t, 
+                data.stats,
+                sqrt_alphas_cumprod, 
+                sqrt_one_minus_alphas_cumprod,
+                loss_type="huber"
+            )
             loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                [p for n, p in denoise_model.named_parameters() if "attention" in n], 
+                max_norm=1.0
+            )
+            optimizer.step()
+
             train_loss_all += x_g.size(0) * loss.item()
             train_count += x_g.size(0)
             optimizer.step()
@@ -269,7 +287,7 @@ with open("output.csv", "w", newline="") as csvfile:
 
         samples = sample(denoise_model, data.stats, latent_dim=args.latent_dim, timesteps=args.timesteps, betas=betas, batch_size=bs)
         x_sample = samples[-1]
-        adj = autoencoder.decode_mu(x_sample)
+        adj = autoencoder.decode_mu(x_sample, stat)
         stat_d = torch.reshape(stat, (-1, args.n_condition))
 
 
