@@ -5,6 +5,7 @@ import numpy as np
 import scipy as sp
 import scipy.sparse
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import community as community_louvain
 from transformers import AutoTokenizer, AutoModel
@@ -264,28 +265,26 @@ def sigmoid_beta_schedule(timesteps):
 
 
 class CrossAttention(nn.Module):
-    def __init__(self, graph_dim, text_dim, num_heads=8):
+    def __init__(self, graph_dim, text_dim, d_condition=128, num_heads=8):
         super().__init__()
         self.num_heads = num_heads
-        self.head_dim = graph_dim // num_heads
+        self.head_dim = d_condition // num_heads  # Using d_condition for consistent dimensionality
         self.scale = self.head_dim ** -0.5
 
-        self.to_q = nn.Linear(graph_dim, graph_dim)
-        self.to_k = nn.Linear(text_dim, graph_dim)
-        self.to_v = nn.Linear(text_dim, graph_dim)
+        # Adjust dimensions to match projected text size (d_condition) and graph features
+        self.to_q = nn.Linear(graph_dim, d_condition)
+        self.to_k = nn.Linear(d_condition, d_condition)  # text is already projected to d_condition
+        self.to_v = nn.Linear(d_condition, d_condition)
 
         self.to_out = nn.Sequential(
-            nn.Linear(graph_dim, graph_dim),
+            nn.Linear(d_condition, graph_dim),  # Map back to graph dimension
             nn.Dropout(0.1)
         )
 
     def forward(self, graph_features, text_embedding):
         batch_size = graph_features.shape[0]
 
-        # Reshape text embedding to match batch size
-        text_embedding = text_embedding.expand(batch_size, -1, -1)
-
-        # Split into heads
+        # Reshape query, key, value
         q = self.to_q(graph_features)
         k = self.to_k(text_embedding)
         v = self.to_v(text_embedding)

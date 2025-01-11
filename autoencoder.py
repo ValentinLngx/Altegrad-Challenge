@@ -102,6 +102,7 @@ class GIN(nn.Module):
 # ------------------------------------------------------------------
 # 3. Variational AutoEncoder with property conditioning + CLAMP
 # ------------------------------------------------------------------
+
 class VariationalAutoEncoder(nn.Module):
     def __init__(
             self,
@@ -122,10 +123,17 @@ class VariationalAutoEncoder(nn.Module):
         self.d_condition = d_condition
 
         # Text encoder for the description
-        self.text_encoder = TextEncoder()  # The class we defined earlier
+        self.text_encoder = TextEncoder()
 
-        # Cross-attention layer
-        self.cross_attention = CrossAttention(hidden_dim_enc, text_dim)
+        # Project text embedding first (before cross-attention)
+        self.text_projection = nn.Linear(text_dim, self.d_condition)
+
+        # Cross-attention layer with correct dimensions
+        self.cross_attention = CrossAttention(
+            graph_dim=hidden_dim_enc,
+            text_dim=self.d_condition,  # Use projected text_dim
+            d_condition=self.d_condition
+        )
 
         # Original components
         self.stats_encoder = nn.Sequential(
@@ -138,100 +146,155 @@ class VariationalAutoEncoder(nn.Module):
         self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
 
         # Modified to account for text features
+        # Combined dimensions: hidden_dim_enc + d_condition + text_dim
         self.fc_mu = nn.Linear(hidden_dim_enc + self.d_condition + text_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc + self.d_condition + text_dim, latent_dim)
 
         # Decoder now takes additional text features
         self.decoder = Decoder(latent_dim + self.d_condition + text_dim, hidden_dim_dec, n_layers_dec, n_max_nodes)
 
+    def reparameterize(self, mu, logvar):
+        """
+        Reparameterization trick to sample from N(mu, var) from N(0,1).
+        """
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
     def forward(self, data):
         # Get graph features
         x_g = self.encoder(data)  # shape: [B, hidden_dim_enc]
 
         # Get text embedding
-        text_desc = data.text_desc  # You'll need to add this to your Data objects
-        text_embedding = self.text_encoder.encode(text_desc)
+        text_desc = data.text_embedding  # Ensure data has 'text_desc' attribute
+        text_embedding = self.text_encoder.encode(text_desc)  # shape: [B, text_dim]
 
-        # Apply cross-attention
-        enhanced_features = self.cross_attention(x_g.unsqueeze(1), text_embedding).squeeze(1)
+        # Project text embedding before cross-attention
+        text_emb_proj = self.text_projection(text_embedding)  # shape: [B, d_condition]
+
+        # Apply cross-attention using projected text embedding
+        enhanced_features = self.cross_attention(
+            x_g.unsqueeze(1),  # shape: [B, 1, hidden_dim_enc]
+            text_emb_proj.unsqueeze(1)  # shape: [B, 1, d_condition]
+        ).squeeze(1)  # shape: [B, hidden_dim_enc]
 
         # Get stats embedding
         stats_embed = self.stats_encoder(data.stats)  # shape: [B, d_condition]
 
-        # Combine all features
-        combined = torch.cat([enhanced_features, stats_embed, text_embedding], dim=-1)
+        # Combine all features: [hidden_dim_enc] + [d_condition] + [text_dim]
+        combined = torch.cat([enhanced_features, stats_embed, text_embedding],
+                             dim=-1)  # [B, hidden_dim_enc + d_condition + text_dim]
 
         # Continue with VAE logic
-        mu = self.fc_mu(combined)
-        logvar = self.fc_logvar(combined)
-        z = self.reparameterize(mu, logvar)
+        mu = self.fc_mu(combined)  # [B, latent_dim]
+        logvar = self.fc_logvar(combined)  # [B, latent_dim]
+        z = self.reparameterize(mu, logvar)  # [B, latent_dim]
 
         # Include text embedding in decoder conditioning
-        z_cond = torch.cat([z, stats_embed, text_embedding], dim=-1)
-        adjacency_logits = self.decoder(z_cond)
+        z_cond = torch.cat([z, stats_embed, text_embedding], dim=-1)  # [B, latent_dim + d_condition + text_dim]
+        adjacency_logits = self.decoder(z_cond)  # Decoder output
+
         return adjacency_logits
 
     def encode(self, data):
-        x_g = self.encoder(data)
-        text_desc = data.text_desc
-        text_embedding = self.text_encoder.encode(text_desc)
-        enhanced_features = self.cross_attention(x_g.unsqueeze(1), text_embedding).squeeze(1)
-        stats_embed = self.stats_encoder(data.stats)
-        combined = torch.cat([enhanced_features, stats_embed, text_embedding], dim=-1)
-        mu = self.fc_mu(combined)
-        logvar = self.fc_logvar(combined)
-        z = self.reparameterize(mu, logvar)
+        x_g = self.encoder(data)  # [B, hidden_dim_enc]
+        print(data)
+        text_desc = data.text_embedding
+        text_embedding = self.text_encoder.encode(text_desc)  # [B, text_dim]
+
+        # Project text embedding before cross-attention
+        text_emb_proj = self.text_projection(text_embedding)  # [B, d_condition]
+
+        # Apply cross-attention using projected text embedding
+        enhanced_features = self.cross_attention(
+            x_g.unsqueeze(1),  # [B, 1, hidden_dim_enc]
+            text_emb_proj.unsqueeze(1)  # [B, 1, d_condition]
+        ).squeeze(1)  # [B, hidden_dim_enc]
+
+        stats_embed = self.stats_encoder(data.stats)  # [B, d_condition]
+
+        # Combine all features
+        combined = torch.cat([enhanced_features, stats_embed, text_embedding],
+                             dim=-1)  # [B, hidden_dim_enc + d_condition + text_dim]
+
+        mu = self.fc_mu(combined)  # [B, latent_dim]
+        logvar = self.fc_logvar(combined)  # [B, latent_dim]
+        z = self.reparameterize(mu, logvar)  # [B, latent_dim]
+
         return z, stats_embed, text_embedding
 
     def decode_mu(self, z, stats=None, text_desc=None):
         if stats is None or text_desc is None:
             raise ValueError("Must provide both 'stats' and 'text_desc' for conditioned decoding.")
-        stats_embed = self.stats_encoder(stats)
-        text_embedding = self.text_encoder.encode(text_desc)
-        z_cond = torch.cat([z, stats_embed, text_embedding], dim=-1)
-        return self.decoder(z_cond)
 
-    def loss_function(self, data, beta=0.05, gamma=0.1):
-        """
-        data: includes:
-          - A (adjacency) of shape [B, n_max_nodes, n_max_nodes]
-          - stats (property vector), shape [B, n_condition]
-        """
-        x_g = self.encoder(data)
-        stats_embed = self.stats_encoder(data.stats)
-        combined = torch.cat([x_g, stats_embed], dim=-1)
+        stats_embed = self.stats_encoder(stats)  # [B, d_condition]
+        text_embedding = self.text_encoder.encode(text_desc)  # [B, text_dim]
 
-        mu = self.fc_mu(combined)
-        logvar = self.fc_logvar(combined)
-        # Clamp logvar to reduce exploding variance
-        logvar = torch.clamp(logvar, -10, 10)
+        # Project text embedding before cross-attention
+        text_emb_proj = self.text_projection(text_embedding)  # [B, d_condition]
 
-        z = self.reparameterize(mu, logvar)
-
-        # Decode => adjacency logits
-        z_cond = torch.cat([z, stats_embed], dim=-1)
+        # Since decode_mu doesn't use cross-attention, but follows similar pattern
+        # Here, assuming decoder needs the same conditioning as in forward
+        # Combine conditioning features
+        z_cond = torch.cat([z, stats_embed, text_embedding], dim=-1)  # [B, latent_dim + d_condition + text_dim]
         adjacency_logits = self.decoder(z_cond)
 
-        bsz, n_nodes, _ = adjacency_logits.shape
-        target_adj = data.A.float()
+        return adjacency_logits
 
-        # 1) Reconstruction loss
+    def loss_function(self, data, beta=0.05, gamma=0.1):
+        x_g = self.encoder(data)  # [B, hidden_dim_enc]
+
+        # Handle text embedding
+        if hasattr(data, 'text_desc'):
+            text_embedding = self.text_encoder.encode(data.text_embedding)  # [B, text_dim]
+            text_emb_proj = self.text_projection(text_embedding)  # [B, d_condition]
+        else:
+            # If no text description, use zero vector for projected text embedding
+            text_embedding = torch.zeros(x_g.size(0), 768).to(x_g.device)  # Assuming text_dim=768
+            text_emb_proj = torch.zeros(x_g.size(0), self.d_condition).to(x_g.device)
+
+        # Apply cross-attention using projected text embedding
+        enhanced_features = self.cross_attention(
+            x_g.unsqueeze(1),  # [B, 1, hidden_dim_enc]
+            text_emb_proj.unsqueeze(1)  # [B, 1, d_condition]
+        ).squeeze(1)  # [B, hidden_dim_enc]
+
+        # Get stats embedding
+        stats_embed = self.stats_encoder(data.stats)  # [B, d_condition]
+
+        # Combine features: [enhanced_features] + [stats_embed] + [raw text_embedding]
+        combined = torch.cat([enhanced_features, stats_embed, text_embedding],
+                             dim=-1)  # [B, hidden_dim_enc + d_condition + text_dim]
+
+        mu = self.fc_mu(combined)  # [B, latent_dim]
+        logvar = self.fc_logvar(combined)  # [B, latent_dim]
+        logvar = torch.clamp(logvar, -10, 10)  # Stability
+        z = self.reparameterize(mu, logvar)  # [B, latent_dim]
+
+        # Include text embedding in decoder conditioning
+        z_cond = torch.cat([z, stats_embed, text_embedding], dim=-1)  # [B, latent_dim + d_condition + text_dim]
+        adjacency_logits = self.decoder(z_cond)  # [B, n_max_nodes, n_max_nodes]
+
+        bsz, n_nodes, _ = adjacency_logits.shape
+        target_adj = data.A.float()  # [B, n_max_nodes, n_max_nodes]
+
+        # Reconstruction loss
         recon_loss = F.binary_cross_entropy_with_logits(
             adjacency_logits.view(bsz, -1),
             target_adj.view(bsz, -1),
             reduction='mean'
         )
 
-        # 2) KL Divergence
+        # KL Divergence
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
         kld = kld / bsz
 
-        # 3) Optional property matching
+        # Property matching loss
         property_loss = 0.
         if gamma > 0.:
-            adj_hard = (torch.sigmoid(adjacency_logits) > 0.5).float()
-            edges_pred = adj_hard.sum(dim=[1, 2]) / 2.0
-            edges_true = data.stats[:, 1]  # assume stats[:,1] is #edges
+            adj_hard = (torch.sigmoid(adjacency_logits) > 0.5).float()  # [B, n_max_nodes, n_max_nodes]
+            edges_pred = adj_hard.sum(dim=[1, 2]) / 2.0  # [B]
+            edges_true = data.stats[:, 1]  # Assuming second stat is number of edges
             property_loss = F.mse_loss(edges_pred, edges_true)
 
         loss = recon_loss + beta * kld + gamma * property_loss

@@ -101,7 +101,7 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 trainset = preprocess_dataset("train", args.n_max_nodes, args.spectral_emb_dim)
 validset = preprocess_dataset("valid", args.n_max_nodes, args.spectral_emb_dim)
 testset  = preprocess_dataset("test",  args.n_max_nodes, args.spectral_emb_dim)
-
+print(trainset)
 train_loader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
 val_loader   = DataLoader(validset, batch_size=args.batch_size, shuffle=False)
 test_loader  = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
