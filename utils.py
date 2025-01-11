@@ -7,6 +7,7 @@ import scipy.sparse
 import torch
 import torch.nn.functional as F
 import community as community_louvain
+from transformers import AutoTokenizer, AutoModel
 
 from torch import Tensor
 from torch.utils.data import Dataset
@@ -20,18 +21,41 @@ from torch_geometric.data import Data
 from extract_feats import extract_feats, extract_numbers
 
 
+class TextEncoder:
+    def __init__(self, model_name="bert-base-uncased", max_length=512):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
+        self.max_length = max_length
 
-def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim):
+    def encode(self, text):
+        # Tokenize and encode the text
+        inputs = self.tokenizer(text,
+                                return_tensors="pt",
+                                max_length=self.max_length,
+                                padding=True,
+                                truncation=True)
+
+        # Get BERT embeddings
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            # Use [CLS] token embedding as the sentence embedding
+            embeddings = outputs.last_hidden_state[:, 0, :]
+
+        return embeddings
+
+
+def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim, text_encoder=None):
+    if text_encoder is None:
+        text_encoder = TextEncoder()
 
     data_lst = []
     if dataset == 'test':
-        filename = './data/dataset_'+dataset+'.pt'
-        desc_file = './data/'+dataset+'/test.txt'
+        filename = './data/dataset_' + dataset + '.pt'
+        desc_file = './data/' + dataset + '/test.txt'
 
         if os.path.isfile(filename):
             data_lst = torch.load(filename)
             print(f'Dataset {filename} loaded from file')
-
         else:
             fr = open(desc_file, "r")
             for line in fr:
@@ -40,106 +64,122 @@ def preprocess_dataset(dataset, n_max_nodes, spectral_emb_dim):
                 graph_id = tokens[0]
                 desc = tokens[1:]
                 desc = "".join(desc)
+
+                # Get both numerical features and text embeddings
                 feats_stats = extract_numbers(desc)
                 feats_stats = torch.FloatTensor(feats_stats).unsqueeze(0)
-                data_lst.append(Data(stats=feats_stats, filename = graph_id))
-            fr.close()                    
+
+                # Generate text embeddings
+                text_embedding = text_encoder.encode(desc)
+
+                data_lst.append(Data(
+                    stats=feats_stats,
+                    text_embedding=text_embedding,
+                    filename=graph_id
+                ))
+            fr.close()
             torch.save(data_lst, filename)
             print(f'Dataset {filename} saved')
 
-
     else:
-        filename = './data/dataset_'+dataset+'.pt'
-        graph_path = './data/'+dataset+'/graph'
-        desc_path = './data/'+dataset+'/description'
+        filename = './data/dataset_' + dataset + '.pt'
+        graph_path = './data/' + dataset + '/graph'
+        desc_path = './data/' + dataset + '/description'
 
         if os.path.isfile(filename):
             data_lst = torch.load(filename)
             print(f'Dataset {filename} loaded from file')
-
         else:
-            # traverse through all the graphs of the folder
             files = [f for f in os.listdir(graph_path)]
-            adjs = []
-            eigvals = []
-            eigvecs = []
-            n_nodes = []
-            max_eigval = 0
-            min_eigval = 0
             for fileread in tqdm(files):
                 tokens = fileread.split("/")
                 idx = tokens[-1].find(".")
                 filen = tokens[-1][:idx]
-                extension = tokens[-1][idx+1:]
-                fread = os.path.join(graph_path,fileread)
-                fstats = os.path.join(desc_path,filen+".txt")
-                #load dataset to networkx
-                if extension=="graphml":
-                    G = nx.read_graphml(fread)
-                    # Convert node labels back to tuples since GraphML stores them as strings
-                    G = nx.convert_node_labels_to_integers(
-                        G, ordering="sorted"
-                    )
-                else:
-                    G = nx.read_edgelist(fread)
-                # use canonical order (BFS) to create adjacency matrix
-                ### BFS & DFS from largest-degree node
+                extension = tokens[-1][idx + 1:]
+                fread = os.path.join(graph_path, fileread)
+                fstats = os.path.join(desc_path, filen + ".txt")
 
-                
-                CGs = [G.subgraph(c) for c in nx.connected_components(G)]
+                # Graph processing (same as before)
+                G = nx.read_graphml(fread) if extension == "graphml" else nx.read_edgelist(fread)
+                G = nx.convert_node_labels_to_integers(G, ordering="sorted")
 
-                # rank connected componets from large to small size
-                CGs = sorted(CGs, key=lambda x: x.number_of_nodes(), reverse=True)
+                # Rest of the graph processing code remains the same until...
 
-                node_list_bfs = []
-                for ii in range(len(CGs)):
-                    node_degree_list = [(n, d) for n, d in CGs[ii].degree()]
-                    degree_sequence = sorted(
-                    node_degree_list, key=lambda tt: tt[1], reverse=True)
+                # Get graph embeddings
+                adj, edge_index, x = process_graph(G, n_max_nodes, spectral_emb_dim)
 
-                    bfs_tree = nx.bfs_tree(CGs[ii], source=degree_sequence[0][0])
-                    node_list_bfs += list(bfs_tree.nodes())
-
-                adj_bfs = nx.to_numpy_array(G, nodelist=node_list_bfs)
-
-                adj = torch.from_numpy(adj_bfs).float()
-                diags = np.sum(adj_bfs, axis=0)
-                diags = np.squeeze(np.asarray(diags))
-                D = sparse.diags(diags).toarray()
-                L = D - adj_bfs
-                with np.errstate(divide="ignore"):
-                    diags_sqrt = 1.0 / np.sqrt(diags)
-                diags_sqrt[np.isinf(diags_sqrt)] = 0
-                DH = sparse.diags(diags).toarray()
-                L = np.linalg.multi_dot((DH, L, DH))
-                L = torch.from_numpy(L).float()
-                eigval, eigvecs = torch.linalg.eigh(L)
-                eigval = torch.real(eigval)
-                eigvecs = torch.real(eigvecs)
-                idx = torch.argsort(eigval)
-                eigvecs = eigvecs[:,idx]
-
-                edge_index = torch.nonzero(adj).t()
-
-                size_diff = n_max_nodes - G.number_of_nodes()
-                x = torch.zeros(G.number_of_nodes(), spectral_emb_dim+1)
-                x[:,0] = torch.mm(adj, torch.ones(G.number_of_nodes(), 1))[:,0]/(n_max_nodes-1)
-                mn = min(G.number_of_nodes(),spectral_emb_dim)
-                mn+=1
-                x[:,1:mn] = eigvecs[:,:spectral_emb_dim]
-                adj = F.pad(adj, [0, size_diff, 0, size_diff])
-                adj = adj.unsqueeze(0)
+                # Get both numerical features and text embeddings
+                with open(fstats, 'r') as f:
+                    desc = f.read().strip()
 
                 feats_stats = extract_feats(fstats)
                 feats_stats = torch.FloatTensor(feats_stats).unsqueeze(0)
 
-                data_lst.append(Data(x=x, edge_index=edge_index, A=adj, stats=feats_stats, filename = filen))
+                # Generate text embeddings
+                text_embedding = text_encoder.encode(desc)
+
+                data_lst.append(Data(
+                    x=x,
+                    edge_index=edge_index,
+                    A=adj,
+                    stats=feats_stats,
+                    text_embedding=text_embedding,
+                    filename=filen
+                ))
+
             torch.save(data_lst, filename)
             print(f'Dataset {filename} saved')
+
     return data_lst
 
 
-        
+def process_graph(G, n_max_nodes, spectral_emb_dim):
+    """Helper function to process graph and get embeddings"""
+    CGs = [G.subgraph(c) for c in nx.connected_components(G)]
+    CGs = sorted(CGs, key=lambda x: x.number_of_nodes(), reverse=True)
+
+    node_list_bfs = []
+    for ii in range(len(CGs)):
+        node_degree_list = [(n, d) for n, d in CGs[ii].degree()]
+        degree_sequence = sorted(node_degree_list, key=lambda tt: tt[1], reverse=True)
+        bfs_tree = nx.bfs_tree(CGs[ii], source=degree_sequence[0][0])
+        node_list_bfs += list(bfs_tree.nodes())
+
+    adj_bfs = nx.to_numpy_array(G, nodelist=node_list_bfs)
+    adj = torch.from_numpy(adj_bfs).float()
+
+    # Compute Laplacian eigenvectors
+    diags = np.sum(adj_bfs, axis=0)
+    diags = np.squeeze(np.asarray(diags))
+    D = sparse.diags(diags).toarray()
+    L = D - adj_bfs
+    with np.errstate(divide="ignore"):
+        diags_sqrt = 1.0 / np.sqrt(diags)
+    diags_sqrt[np.isinf(diags_sqrt)] = 0
+    DH = sparse.diags(diags).toarray()
+    L = np.linalg.multi_dot((DH, L, DH))
+    L = torch.from_numpy(L).float()
+    eigval, eigvecs = torch.linalg.eigh(L)
+    eigval = torch.real(eigval)
+    eigvecs = torch.real(eigvecs)
+    idx = torch.argsort(eigval)
+    eigvecs = eigvecs[:, idx]
+
+    edge_index = torch.nonzero(adj).t()
+
+    # Create node features
+    size_diff = n_max_nodes - G.number_of_nodes()
+    x = torch.zeros(G.number_of_nodes(), spectral_emb_dim + 1)
+    x[:, 0] = torch.mm(adj, torch.ones(G.number_of_nodes(), 1))[:, 0] / (n_max_nodes - 1)
+    mn = min(G.number_of_nodes(), spectral_emb_dim)
+    mn += 1
+    x[:, 1:mn] = eigvecs[:, :spectral_emb_dim]
+
+    # Pad adjacency matrix
+    adj = F.pad(adj, [0, size_diff, 0, size_diff])
+    adj = adj.unsqueeze(0)
+
+    return adj, edge_index, x
 
 def construct_nx_from_adj(adj):
     G = nx.from_numpy_array(adj, create_using=nx.Graph)
@@ -222,6 +262,47 @@ def sigmoid_beta_schedule(timesteps):
     betas = torch.linspace(-6, 6, timesteps)
     return torch.sigmoid(betas) * (beta_end - beta_start) + beta_start
 
+
+class CrossAttention(nn.Module):
+    def __init__(self, graph_dim, text_dim, num_heads=8):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = graph_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.to_q = nn.Linear(graph_dim, graph_dim)
+        self.to_k = nn.Linear(text_dim, graph_dim)
+        self.to_v = nn.Linear(text_dim, graph_dim)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(graph_dim, graph_dim),
+            nn.Dropout(0.1)
+        )
+
+    def forward(self, graph_features, text_embedding):
+        batch_size = graph_features.shape[0]
+
+        # Reshape text embedding to match batch size
+        text_embedding = text_embedding.expand(batch_size, -1, -1)
+
+        # Split into heads
+        q = self.to_q(graph_features)
+        k = self.to_k(text_embedding)
+        v = self.to_v(text_embedding)
+
+        q = q.reshape(batch_size, -1, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        k = k.reshape(batch_size, -1, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        v = v.reshape(batch_size, -1, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        # Attention
+        attention = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        attention = torch.softmax(attention, dim=-1)
+
+        # Apply attention to values
+        out = torch.matmul(attention, v)
+        out = out.permute(0, 2, 1, 3).reshape(batch_size, -1, self.num_heads * self.head_dim)
+
+        return self.to_out(out)
 
 
 

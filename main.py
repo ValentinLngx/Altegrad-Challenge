@@ -45,7 +45,7 @@ parser.add_argument('--dropout', type=float, default=0.0)
 parser.add_argument('--batch-size', type=int, default=256)
 
 # Number of epochs for autoencoder training
-parser.add_argument('--epochs-autoencoder', type=int, default=200)
+parser.add_argument('--epochs-autoencoder', type=int, default=5)
 
 # Hidden dimension sizes
 parser.add_argument('--hidden-dim-encoder', type=int, default=64)
@@ -65,7 +65,7 @@ parser.add_argument('--n-layers-decoder', type=int, default=3)
 parser.add_argument('--spectral-emb-dim', type=int, default=10)
 
 # Number of training epochs for the denoising model
-parser.add_argument('--epochs-denoise', type=int, default=100)
+parser.add_argument('--epochs-denoise', type=int, default=2)
 
 # Number of timesteps in the diffusion
 parser.add_argument('--timesteps', type=int, default=500)
@@ -118,7 +118,8 @@ autoencoder = VariationalAutoEncoder(
     n_layers_dec=args.n_layers_decoder,
     n_max_nodes=args.n_max_nodes,
     n_condition=args.n_condition,
-    d_condition=args.dim_condition
+    d_condition=args.dim_condition,
+    text_dim=768  # for BERT's output dimension
 ).to(device)
 
 optimizer_ae = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
@@ -319,7 +320,12 @@ with open("output.csv", "w", newline="") as csvfile:
         z_sample = samples[-1]
 
         # Decode => must pass stats
-        adj_logits = autoencoder.decode_mu(z_sample, stats=stat)
+        adj_logits = autoencoder.decode_mu(
+            z_sample,
+            stats=stat,
+            text_desc=data.text_desc  # Text description here
+        )
+
         adj_prob   = torch.sigmoid(adj_logits)
         adj_bin    = (adj_prob > 0.5).float()
 

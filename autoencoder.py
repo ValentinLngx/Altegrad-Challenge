@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GINConv
 from torch_geometric.nn import global_add_pool
+from utils import TextEncoder, CrossAttention
 
 
 # ------------------------------------------------------------------
@@ -103,24 +104,30 @@ class GIN(nn.Module):
 # ------------------------------------------------------------------
 class VariationalAutoEncoder(nn.Module):
     def __init__(
-        self,
-        input_dim,
-        hidden_dim_enc,
-        hidden_dim_dec,
-        latent_dim,
-        n_layers_enc,
-        n_layers_dec,
-        n_max_nodes,
-        n_condition=7,
-        d_condition=128
+            self,
+            input_dim,
+            hidden_dim_enc,
+            hidden_dim_dec,
+            latent_dim,
+            n_layers_enc,
+            n_layers_dec,
+            n_max_nodes,
+            n_condition=7,
+            d_condition=128,
+            text_dim=768  # BERT's default output dimension
     ):
         super(VariationalAutoEncoder, self).__init__()
         self.n_max_nodes = n_max_nodes
-
         self.n_condition = n_condition
         self.d_condition = d_condition
 
-        # small MLP to encode the property vector
+        # Text encoder for the description
+        self.text_encoder = TextEncoder()  # The class we defined earlier
+
+        # Cross-attention layer
+        self.cross_attention = CrossAttention(hidden_dim_enc, text_dim)
+
+        # Original components
         self.stats_encoder = nn.Sequential(
             nn.Linear(self.n_condition, 64),
             nn.ReLU(),
@@ -128,53 +135,60 @@ class VariationalAutoEncoder(nn.Module):
             nn.ReLU(),
         )
 
-        # GIN encoder
         self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
 
-        # Mu/LogVar from hidden_dim_enc + d_condition
-        self.fc_mu = nn.Linear(hidden_dim_enc + self.d_condition, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim_enc + self.d_condition, latent_dim)
+        # Modified to account for text features
+        self.fc_mu = nn.Linear(hidden_dim_enc + self.d_condition + text_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim_enc + self.d_condition + text_dim, latent_dim)
 
-        # Decoder: input is (latent_dim + d_condition)
-        self.decoder = Decoder(latent_dim + self.d_condition, hidden_dim_dec, n_layers_dec, n_max_nodes)
-
-    def reparameterize(self, mu, logvar):
-        # Clamp logvar to avoid large exponent
-        logvar = torch.clamp(logvar, -10, 10)
-        if self.training:
-            std = torch.exp(0.5 * logvar)
-            eps = torch.randn_like(std)
-            return eps * std + mu
-        else:
-            return mu
+        # Decoder now takes additional text features
+        self.decoder = Decoder(latent_dim + self.d_condition + text_dim, hidden_dim_dec, n_layers_dec, n_max_nodes)
 
     def forward(self, data):
-        x_g = self.encoder(data)                     # shape: [B, hidden_dim_enc]
-        stats_embed = self.stats_encoder(data.stats) # shape: [B, d_condition]
+        # Get graph features
+        x_g = self.encoder(data)  # shape: [B, hidden_dim_enc]
 
-        combined = torch.cat([x_g, stats_embed], dim=-1)
+        # Get text embedding
+        text_desc = data.text_desc  # You'll need to add this to your Data objects
+        text_embedding = self.text_encoder.encode(text_desc)
+
+        # Apply cross-attention
+        enhanced_features = self.cross_attention(x_g.unsqueeze(1), text_embedding).squeeze(1)
+
+        # Get stats embedding
+        stats_embed = self.stats_encoder(data.stats)  # shape: [B, d_condition]
+
+        # Combine all features
+        combined = torch.cat([enhanced_features, stats_embed, text_embedding], dim=-1)
+
+        # Continue with VAE logic
         mu = self.fc_mu(combined)
         logvar = self.fc_logvar(combined)
         z = self.reparameterize(mu, logvar)
 
-        z_cond = torch.cat([z, stats_embed], dim=-1)
+        # Include text embedding in decoder conditioning
+        z_cond = torch.cat([z, stats_embed, text_embedding], dim=-1)
         adjacency_logits = self.decoder(z_cond)
         return adjacency_logits
 
     def encode(self, data):
         x_g = self.encoder(data)
+        text_desc = data.text_desc
+        text_embedding = self.text_encoder.encode(text_desc)
+        enhanced_features = self.cross_attention(x_g.unsqueeze(1), text_embedding).squeeze(1)
         stats_embed = self.stats_encoder(data.stats)
-        combined = torch.cat([x_g, stats_embed], dim=-1)
+        combined = torch.cat([enhanced_features, stats_embed, text_embedding], dim=-1)
         mu = self.fc_mu(combined)
         logvar = self.fc_logvar(combined)
         z = self.reparameterize(mu, logvar)
-        return z, stats_embed
+        return z, stats_embed, text_embedding
 
-    def decode_mu(self, z, stats=None):
-        if stats is None:
-            raise ValueError("Must provide 'stats' for conditioned decoding.")
+    def decode_mu(self, z, stats=None, text_desc=None):
+        if stats is None or text_desc is None:
+            raise ValueError("Must provide both 'stats' and 'text_desc' for conditioned decoding.")
         stats_embed = self.stats_encoder(stats)
-        z_cond = torch.cat([z, stats_embed], dim=-1)
+        text_embedding = self.text_encoder.encode(text_desc)
+        z_cond = torch.cat([z, stats_embed, text_embedding], dim=-1)
         return self.decoder(z_cond)
 
     def loss_function(self, data, beta=0.05, gamma=0.1):
