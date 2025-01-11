@@ -27,9 +27,9 @@ from torch.utils.data import Subset
 from autoencoder import VariationalAutoEncoder  # This is the updated AE w/ clamp
 from denoise_model import DenoiseNN, p_losses, sample
 from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
+from utils import LatentDiscriminator
 
 np.random.seed(13)
-
 
 
 parser = argparse.ArgumentParser(description='Configuration for the NeuralGraphGenerator model')
@@ -45,7 +45,7 @@ parser.add_argument('--dropout', type=float, default=0.0)
 parser.add_argument('--batch-size', type=int, default=256)
 
 # Number of epochs for autoencoder training
-parser.add_argument('--epochs-autoencoder', type=int, default=200)
+parser.add_argument('--epochs-autoencoder', type=int, default=5)
 
 # Hidden dimension sizes
 parser.add_argument('--hidden-dim-encoder', type=int, default=64)
@@ -65,7 +65,7 @@ parser.add_argument('--n-layers-decoder', type=int, default=3)
 parser.add_argument('--spectral-emb-dim', type=int, default=10)
 
 # Number of training epochs for the denoising model
-parser.add_argument('--epochs-denoise', type=int, default=100)
+parser.add_argument('--epochs-denoise', type=int, default=11)
 
 # Number of timesteps in the diffusion
 parser.add_argument('--timesteps', type=int, default=500)
@@ -92,8 +92,19 @@ parser.add_argument('--gamma', type=float, default=0.0,
 parser.add_argument('--beta', type=float, default=0.05, 
                     help="KL term weight in the VAE loss")
 
+parser.add_argument('--train-gan', action='store_true', default=False,
+                    help="Flag to enable GAN-based adversarial training alongside autoencoder.")
+parser.add_argument('--gan-lambda', type=float, default=0.1,
+                    help="Weight for the adversarial loss term (default: 0.1).")
+parser.add_argument('--gan-n-critic', type=int, default=5,
+                    help="Number of critic/discriminator updates per generator update (WGAN) (default: 5).")
+
+
 args = parser.parse_args()
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+
+
 
 # --------------------------------------------------------------------------
 # 1) Preprocess dataset
@@ -124,6 +135,52 @@ autoencoder = VariationalAutoEncoder(
 optimizer_ae = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
 scheduler_ae = torch.optim.lr_scheduler.StepLR(optimizer_ae, step_size=500, gamma=0.1)
 
+# Initialize Discriminator and its optimizer if GAN is enabled
+if args.train_gan:
+    discriminator = LatentDiscriminator(latent_dim=args.latent_dim).to(device)
+    optimizer_disc = torch.optim.Adam(
+        discriminator.parameters(),
+        lr=args.lr,
+        betas=(0.5, 0.9)  # Commonly used betas for WGAN
+    )
+
+def wgan_critic_loss(real_score, fake_score):
+    """
+    Computes the WGAN critic loss.
+    """
+    return fake_score.mean() - real_score.mean()
+
+def wgan_gen_loss(fake_score):
+    """
+    Computes the WGAN generator loss.
+    """
+    return -fake_score.mean()
+
+def gradient_penalty(discriminator, real_samples, fake_samples, device, gp_coef=10.0):
+    """
+    Computes the gradient penalty for WGAN-GP.
+    """
+    alpha = torch.rand(real_samples.size(0), 1).to(device)
+    alpha = alpha.expand_as(real_samples)
+    interpolates = alpha * real_samples + (1 - alpha) * fake_samples
+    interpolates.requires_grad_(True)
+
+    d_interpolates = discriminator(interpolates)
+    gradients = torch.autograd.grad(
+        outputs=d_interpolates,
+        inputs=interpolates,
+        grad_outputs=torch.ones_like(d_interpolates),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True
+    )[0]
+
+    gradients = gradients.view(gradients.size(0), -1)
+    gradient_norm = gradients.norm(2, dim=1)
+    gp = gp_coef * ((gradient_norm - 1) ** 2).mean()
+    return gp
+
+
 # --------------------------------------------------------------------------
 # 3) Train autoencoder (with gradient clipping)
 # --------------------------------------------------------------------------
@@ -131,6 +188,8 @@ if args.train_autoencoder:
     best_val_loss = float('inf')
     for epoch in range(1, args.epochs_autoencoder + 1):
         autoencoder.train()
+        if args.train_gan:
+            discriminator.train()
         train_loss_all = 0.0
         train_recon_all = 0.0
         train_kld_all = 0.0
@@ -138,65 +197,140 @@ if args.train_autoencoder:
 
         for data in train_loader:
             data = data.to(device)
-            optimizer_ae.zero_grad()
-            # property matching is turned off if gamma=0
-            loss, recon, kld = autoencoder.loss_function(data, 
-                                                            beta=args.beta, 
-                                                            gamma=args.gamma)
-            loss.backward()
-            
-            # Gradient clipping to avoid exploding grads
-            torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), max_norm=5.0)
-            optimizer_ae.step()
-            
-            train_loss_all   += loss.item()
-            train_recon_all  += recon.item()
-            train_kld_all    += kld.item()
-            cnt_train        += 1
+            batch_size = data.num_graphs
+
+            if args.train_gan:
+                # ======================
+                # 1) Update Discriminator (Critic)
+                # ======================
+                for _ in range(args.gan_n_critic):
+                    optimizer_disc.zero_grad()
+
+                    # Real latent vectors from prior
+                    z_real = torch.randn(batch_size, args.latent_dim, device=device)
+
+                    # Fake latent vectors from encoder
+                    z_mu, z_logvar = autoencoder.encode(data)
+                    z_fake = autoencoder.reparameterize(z_mu, z_logvar)
+
+                    # Critic scores
+                    real_score = discriminator(z_real)
+                    fake_score = discriminator(z_fake.detach())
+
+                    # WGAN loss
+                    d_loss = wgan_critic_loss(real_score, fake_score)
+
+                    # Gradient penalty
+                    if args.use_gradient_penalty:
+                        gp = gradient_penalty(discriminator, z_real, z_fake.detach(), device, gp_coef=args.gp_coef)
+                        d_loss += gp
+
+                    d_loss.backward()
+                    optimizer_disc.step()
+
+                # ======================
+                # 2) Update Generator (Encoder/Decoder)
+                # ======================
+                optimizer_ae.zero_grad()
+
+                # VAE loss
+                loss, recon, kld = autoencoder.loss_function(data, beta=args.beta, gamma=args.gamma)
+
+                # Adversarial loss
+                z_mu, z_logvar = autoencoder.encode(data)
+                z_fake = autoencoder.reparameterize(z_mu, z_logvar)
+                fake_score_for_gen = discriminator(z_fake)
+                g_loss = wgan_gen_loss(fake_score_for_gen)
+
+                # Total loss
+                total_loss = loss + args.gan_lambda * g_loss
+                total_loss.backward()
+
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), max_norm=5.0)
+                optimizer_ae.step()
+
+                # Accumulate losses
+                train_loss_all += total_loss.item()
+                train_recon_all += recon.item()
+                train_kld_all += kld.item()
+                cnt_train += 1
+            else:
+                # ======================
+                # Standard VAE Training (No GAN)
+                # ======================
+                optimizer_ae.zero_grad()
+                loss, recon, kld = autoencoder.loss_function(data, beta=args.beta, gamma=args.gamma)
+                loss.backward()
+
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), max_norm=5.0)
+                optimizer_ae.step()
+
+                # Accumulate losses
+                train_loss_all += loss.item()
+                train_recon_all += recon.item()
+                train_kld_all += kld.item()
+                cnt_train += 1
 
         # Validation
         autoencoder.eval()
-        val_loss_all  = 0.0
+        if args.train_gan:
+            discriminator.eval()
+        val_loss_all = 0.0
         val_recon_all = 0.0
-        val_kld_all   = 0.0
-        cnt_val       = 0
+        val_kld_all = 0.0
+        cnt_val = 0
 
         with torch.no_grad():
             for data in val_loader:
                 data = data.to(device)
-                v_loss, v_recon, v_kld = autoencoder.loss_function(
-                    data, beta=args.beta, gamma=args.gamma
-                )
-                val_loss_all  += v_loss.item()
+                batch_size = data.num_graphs
+
+                # Encode data to obtain latent vectors
+                z_mu, z_logvar = autoencoder.encode(data)
+                z = autoencoder.reparameterize(z_mu, z_logvar)
+
+                # Compute VAE loss
+                v_loss, v_recon, v_kld = autoencoder.loss_function(data, beta=args.beta, gamma=args.gamma)
+                val_loss_all += v_loss.item()
                 val_recon_all += v_recon.item()
-                val_kld_all   += v_kld.item()
-                cnt_val       += 1
+                val_kld_all += v_kld.item()
+                cnt_val += 1
 
         # Logging
         dt_t = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         print(f'{dt_t} Epoch: {epoch:03d}, '
-                f'Train Loss: {train_loss_all/cnt_train:.5f}, '
-                f'Train Recon: {train_recon_all/cnt_train:.5f}, '
-                f'Train KLD: {train_kld_all/cnt_train:.5f}, '
-                f'Val Loss: {val_loss_all/cnt_val:.5f}, '
-                f'Val Recon: {val_recon_all/cnt_val:.5f}, '
-                f'Val KLD: {val_kld_all/cnt_val:.5f}')
+              f'Train Loss: {train_loss_all/cnt_train:.5f}, '
+              f'Train Recon: {train_recon_all/cnt_train:.5f}, '
+              f'Train KLD: {train_kld_all/cnt_train:.5f}, '
+              f'Val Loss: {val_loss_all/cnt_val:.5f}, '
+              f'Val Recon: {val_recon_all/cnt_val:.5f}, '
+              f'Val KLD: {val_kld_all/cnt_val:.5f}')
 
         scheduler_ae.step()
 
-        # Save best
+        # Save best model based on validation loss
         if (val_loss_all < best_val_loss):
             best_val_loss = val_loss_all
-            torch.save({
+            save_dict = {
                 'state_dict': autoencoder.state_dict(),
-                'optimizer': optimizer_ae.state_dict(),
-            }, 'autoencoder.pth.tar')
+                'optimizer_ae': optimizer_ae.state_dict(),
+            }
+            if args.train_gan:
+                save_dict['discriminator'] = discriminator.state_dict()
+                save_dict['optimizer_disc'] = optimizer_disc.state_dict()
+            torch.save(save_dict, 'autoencoder.pth.tar')
 else:
     # Load from checkpoint
     checkpoint = torch.load('autoencoder.pth.tar', map_location=device)
     autoencoder.load_state_dict(checkpoint['state_dict'])
+    if args.train_gan and 'discriminator' in checkpoint:
+        discriminator.load_state_dict(checkpoint['discriminator'])
 
 autoencoder.eval()
+if args.train_gan:
+    discriminator.eval()
 
 # --------------------------------------------------------------------------
 # 4) Prepare diffusion model

@@ -5,6 +5,7 @@ import numpy as np
 import scipy as sp
 import scipy.sparse
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import community as community_louvain
 
@@ -222,6 +223,20 @@ def sigmoid_beta_schedule(timesteps):
     betas = torch.linspace(-6, 6, timesteps)
     return torch.sigmoid(betas) * (beta_end - beta_start) + beta_start
 
+
+class LatentDiscriminator(nn.Module):
+    def __init__(self, latent_dim=32):
+        super(LatentDiscriminator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.LeakyReLU(0.2),
+            nn.Linear(128, 64),
+            nn.LeakyReLU(0.2),
+            nn.Linear(64, 1)  # Critic score, not a probability
+        )
+
+    def forward(self, z):
+        return self.model(z)
 
 
 
