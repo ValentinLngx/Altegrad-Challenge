@@ -25,7 +25,7 @@ from torch.utils.data import Subset
 
 # Our modules
 from autoencoder import VariationalAutoEncoder  # This is the updated AE w/ clamp
-from denoise_model import DenoiseNN, p_losses, sample
+from denoise_model import DenoiseNN, p_losses, sample, ImprovedDenoiseNN
 from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
 
 np.random.seed(13)
@@ -34,9 +34,8 @@ np.random.seed(13)
 
 parser = argparse.ArgumentParser(description='Configuration for the NeuralGraphGenerator model')
 
-# Learning rate (lower default to avoid NaNs)
-parser.add_argument('--lr', type=float, default=1e-4, 
-                    help="Learning rate, lowered to avoid NaNs (default: 1e-4)")
+# Learning rate
+parser.add_argument('--lr', type=float, default=5e-5) 
 
 # Dropout rate
 parser.add_argument('--dropout', type=float, default=0.0)
@@ -210,7 +209,7 @@ sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
 sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
 posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 
-denoise_model = DenoiseNN(
+denoise_model = ImprovedDenoiseNN(
     input_dim=args.latent_dim,
     hidden_dim=args.hidden_dim_denoise,
     n_layers=args.n_layers_denoise,
@@ -238,14 +237,21 @@ if args.train_denoiser:
             z, _ = autoencoder.encode(data)
             t = torch.randint(0, args.timesteps, (z.size(0),), device=device).long()
             loss = p_losses(
-                denoise_model, z, t, data.stats,
-                sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod,
+                denoise_model,
+                z,
+                t, 
+                data.stats,
+                sqrt_alphas_cumprod, 
+                sqrt_one_minus_alphas_cumprod,
                 loss_type="huber"
             )
             loss.backward()
             
             # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(denoise_model.parameters(), max_norm=5.0)
+            torch.nn.utils.clip_grad_norm_(
+                [p for n, p in denoise_model.named_parameters() if "attention" in n], 
+                max_norm=1.0
+            )
             optimizer_denoise.step()
 
             train_loss_all += z.size(0) * loss.item()
