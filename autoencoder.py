@@ -54,7 +54,7 @@ class Decoder(nn.Module):
         mlp_layers.append(nn.Linear(hidden_dim, 2 * n_nodes * (n_nodes - 1) // 2))
 
         self.mlp = nn.ModuleList(mlp_layers)
-        self.relu = nn.ReLU()
+        self.silu = nn.SiLU()
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, stats):
@@ -63,7 +63,7 @@ class Decoder(nn.Module):
 
         # Pass through the MLP layers
         for i in range(self.n_layers - 1):
-            x = self.relu(self.mlp[i](x))
+            x = self.silu(self.mlp[i](x))
 
         x = self.mlp[self.n_layers - 1](x)
         x = torch.reshape(x, (x.size(0), -1, 2))
@@ -77,29 +77,23 @@ class Decoder(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    """
-    A simple residual block:
-     - Linear (in->hidden)
-     - Non-linearity (ReLU)
-     - Dropout
-     - Linear (hidden->in)
-     - Skip Connection
-    """
-
     def __init__(self, in_dim, hidden_dim, dropout=0.1):
         super(ResidualBlock, self).__init__()
         self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, in_dim)
+        self.ln2 = nn.LayerNorm(in_dim)
         self.dropout = nn.Dropout(dropout)
-        self.relu = nn.ReLU()
+        self.activation = nn.SiLU()
 
     def forward(self, x):
         # x has shape: (batch_size, in_dim)
         identity = x
-        out = self.relu(self.fc1(x))
+        out = self.activation(self.ln1(self.fc1(x)))
         out = self.dropout(out)
         out = self.fc2(out)
-        return self.relu(out + identity)  # skip connection + activation
+        out = self.ln2(out)
+        return self.activation(out + identity)  # skip connection + activation
 
 
 class FastDecoder(nn.Module):
@@ -127,7 +121,7 @@ class FastDecoder(nn.Module):
         x = torch.cat((x, stats), dim=-1)  # shape: (batch_size, latent_dim+7)
 
         # First layer + activation
-        x = F.relu(self.input_fc(x))  # shape: (batch_size, hidden_dim)
+        x = F.silu(self.input_fc(x))  # shape: (batch_size, hidden_dim)
 
         # Pass through residual blocks
         for block in self.res_blocks:
