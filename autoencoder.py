@@ -6,7 +6,7 @@ from torch_geometric.nn import GINConv
 from torch_geometric.nn import global_add_pool
 
 # Decoder
-class Decoder(nn.Module):
+"""class Decoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes):
         super(Decoder, self).__init__()
         self.n_layers = n_layers
@@ -39,6 +39,123 @@ class Decoder(nn.Module):
         adj[:, idx[0], idx[1]] = x
         adj = adj + torch.transpose(adj, 1, 2)
         return adj
+"""
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_dim, hidden_dim, dropout=0.1):
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(in_dim)
+        self.linear1 = nn.Linear(in_dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.GELU()
+
+        # Add projection layer if dimensions don't match
+        self.projection = None
+        if in_dim != hidden_dim:
+            self.projection = nn.Linear(in_dim, hidden_dim)
+
+    def forward(self, x):
+        identity = x
+
+        # Apply projection if needed
+        if self.projection is not None:
+            identity = self.projection(x)
+
+        # Main branch
+        out = self.layer_norm(x)
+        out = self.linear1(out)
+        out = self.activation(out)
+        out = self.dropout(out)
+        out = self.linear2(out)
+        out = self.dropout(out)
+
+        # Add residual connection
+        return out + identity
+
+
+class GraphAttention(nn.Module):
+    def __init__(self, in_dim, out_dim, num_heads=4):
+        super().__init__()
+        self.num_heads = num_heads
+        self.attention = nn.MultiheadAttention(in_dim, num_heads, batch_first=True)
+        self.layer_norm = nn.LayerNorm(in_dim)
+        self.output_layer = nn.Linear(in_dim, out_dim)
+
+    def forward(self, x):
+        # Apply layer normalization
+        x = self.layer_norm(x)
+
+        # Multi-head attention
+        attended, _ = self.attention(x, x, x)
+
+        # Process output
+        out = self.output_layer(attended)
+        return out
+
+class Decoder(nn.Module):
+    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes):
+        super(Decoder, self).__init__()
+        self.n_layers = n_layers
+        self.n_nodes = n_nodes
+
+        # Add layer normalization for better training stability
+        self.layer_norm = nn.LayerNorm(latent_dim + 7)
+
+        # Use residual connections for better gradient flow
+        self.residual_layers = nn.ModuleList([
+            ResidualBlock(
+                hidden_dim if i > 0 else latent_dim + 7,
+                hidden_dim,
+                dropout=0.1
+            ) for i in range(n_layers - 1)
+        ])
+
+        # Output layer with attention mechanism
+        self.attention = GraphAttention(hidden_dim, hidden_dim)
+        self.final_layer = nn.Linear(hidden_dim, 2)
+
+        # Temperature parameter for Gumbel-Softmax (learnable)
+        self.temperature = nn.Parameter(torch.ones(1))
+
+    def forward(self, x, stats):
+        # Concatenate and normalize inputs
+        x = torch.cat((x, stats), dim=-1)
+        x = self.layer_norm(x)
+
+        # Generate node embeddings
+        batch_size = x.size(0)
+        node_embeddings = x.unsqueeze(1).expand(-1, self.n_nodes, -1)
+
+        # Process through residual layers
+        h = node_embeddings
+        for layer in self.residual_layers:
+            h = layer(h)
+
+        # Apply attention mechanism
+        h = self.attention(h)
+
+        # Generate edge probabilities
+        edge_logits = []
+        for i in range(self.n_nodes):
+            for j in range(i + 1, self.n_nodes):
+                edge_input = torch.cat([h[:, i], h[:, j]], dim=-1)
+                edge_logit = self.final_layer(edge_input)
+                edge_logits.append(edge_logit)
+
+        edge_logits = torch.stack(edge_logits, dim=1)
+
+        # Apply Gumbel-Softmax with learned temperature
+        x = F.gumbel_softmax(edge_logits, tau=self.temperature.abs(), hard=True)[:, :, 0]
+
+        # Convert to adjacency matrix
+        adj = torch.zeros(batch_size, self.n_nodes, self.n_nodes, device=x.device)
+        idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
+        adj[:, idx[0], idx[1]] = x
+        adj = adj + torch.transpose(adj, 1, 2)
+
+        return adj
+
 
 
 class GIN(torch.nn.Module):
@@ -97,7 +214,12 @@ class VariationalAutoEncoder(nn.Module):
         self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
-        self.decoder = Decoder(latent_dim, hidden_dim_dec, n_layers_dec, n_max_nodes)
+        self.decoder = Decoder(
+            latent_dim=latent_dim,
+            hidden_dim=hidden_dim_dec,
+            n_layers=n_layers_dec,
+            n_nodes=n_max_nodes
+        )
 
     def forward(self, data, stats):
         x_g = self.encoder(data)

@@ -2,6 +2,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+import scipy.stats as stats
 
 def extract(a, t, x_shape):
     batch_size = t.shape[0]
