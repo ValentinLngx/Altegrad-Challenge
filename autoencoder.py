@@ -41,57 +41,57 @@ from torch_geometric.nn import global_add_pool
         return adj
 """
 
+
 class ResidualBlock(nn.Module):
-    def __init__(self, in_dim, hidden_dim, dropout=0.1):
-        super().__init__()
-        self.layer_norm = nn.LayerNorm(in_dim)
-        self.linear1 = nn.Linear(in_dim, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+    def __init__(self, in_dim, out_dim, dropout=0.1):
+        super(ResidualBlock, self).__init__()
+        self.linear1 = nn.Linear(in_dim, out_dim)
+        self.linear2 = nn.Linear(out_dim, out_dim)
+        self.norm1 = nn.LayerNorm(out_dim)
+        self.norm2 = nn.LayerNorm(out_dim)
         self.dropout = nn.Dropout(dropout)
-        self.activation = nn.GELU()
+        self.relu = nn.ReLU()
 
         # Add projection layer if dimensions don't match
-        self.projection = None
-        if in_dim != hidden_dim:
-            self.projection = nn.Linear(in_dim, hidden_dim)
+        self.proj = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
 
     def forward(self, x):
-        identity = x
+        # First sub-layer
+        residual = x
+        x = self.norm1(x)
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
 
-        # Apply projection if needed
-        if self.projection is not None:
-            identity = self.projection(x)
-
-        # Main branch
-        out = self.layer_norm(x)
-        out = self.linear1(out)
-        out = self.activation(out)
-        out = self.dropout(out)
-        out = self.linear2(out)
-        out = self.dropout(out)
+        # Second sub-layer
+        x = self.norm2(x)
+        x = self.linear2(x)
+        x = self.dropout(x)
 
         # Add residual connection
-        return out + identity
+        return x + self.proj(residual)
 
 
 class GraphAttention(nn.Module):
-    def __init__(self, in_dim, out_dim, num_heads=4):
-        super().__init__()
-        self.num_heads = num_heads
-        self.attention = nn.MultiheadAttention(in_dim, num_heads, batch_first=True)
-        self.layer_norm = nn.LayerNorm(in_dim)
-        self.output_layer = nn.Linear(in_dim, out_dim)
+    def __init__(self, in_dim, out_dim):
+        super(GraphAttention, self).__init__()
+        self.query = nn.Linear(in_dim, out_dim)
+        self.key = nn.Linear(in_dim, out_dim)
+        self.value = nn.Linear(in_dim, out_dim)
+        self.scale = math.sqrt(out_dim)
 
     def forward(self, x):
-        # Apply layer normalization
-        x = self.layer_norm(x)
+        # x shape: [batch_size, n_nodes, in_dim]
+        q = self.query(x)  # [batch_size, n_nodes, out_dim]
+        k = self.key(x)  # [batch_size, n_nodes, out_dim]
+        v = self.value(x)  # [batch_size, n_nodes, out_dim]
 
-        # Multi-head attention
-        attended, _ = self.attention(x, x, x)
+        # Compute attention scores
+        attention = torch.matmul(q, k.transpose(-2, -1)) / self.scale
+        attention = F.softmax(attention, dim=-1)
 
-        # Process output
-        out = self.output_layer(attended)
-        return out
+        # Apply attention to values
+        return torch.matmul(attention, v)
 
 
 class Decoder(nn.Module):
@@ -100,10 +100,10 @@ class Decoder(nn.Module):
         self.n_layers = n_layers
         self.n_nodes = n_nodes
 
-        # Add layer normalization for better training stability
+        # Layer normalization for input
         self.layer_norm = nn.LayerNorm(latent_dim + 7)
 
-        # Use residual connections for better gradient flow
+        # Residual layers for processing node embeddings
         self.residual_layers = nn.ModuleList([
             ResidualBlock(
                 hidden_dim if i > 0 else latent_dim + 7,
@@ -112,12 +112,13 @@ class Decoder(nn.Module):
             ) for i in range(n_layers - 1)
         ])
 
-        # Output layer with attention mechanism
+        # Attention mechanism
         self.attention = GraphAttention(hidden_dim, hidden_dim)
-        # Modified final layer to account for concatenated edge inputs
-        self.final_layer = nn.Linear(hidden_dim * 2, 2)  # Changed input dim to hidden_dim * 2
 
-        # Temperature parameter for Gumbel-Softmax (learnable)
+        # Final layer to produce edge probabilities
+        self.final_layer = nn.Linear(hidden_dim * 2, 2)
+
+        # Learnable temperature parameter
         self.temperature = nn.Parameter(torch.ones(1))
 
     def forward(self, x, stats):
@@ -135,20 +136,26 @@ class Decoder(nn.Module):
             h = layer(h)
 
         # Apply attention mechanism
-        h = self.attention(h)  # h shape: [batch_size, n_nodes, hidden_dim]
+        h = self.attention(h)  # [batch_size, n_nodes, hidden_dim]
 
-        # Generate edge probabilities
-        edge_logits = []
+        # Generate edge logits for all pairs at once
+        # Create node pairs for all possible edges
+        nodes_i = []
+        nodes_j = []
         for i in range(self.n_nodes):
             for j in range(i + 1, self.n_nodes):
-                # Concatenate node pair embeddings
-                edge_input = torch.cat([h[:, i], h[:, j]], dim=-1)  # shape: [batch_size, hidden_dim * 2]
-                edge_logit = self.final_layer(edge_input)  # shape: [batch_size, 2]
-                edge_logits.append(edge_logit)
+                nodes_i.append(i)
+                nodes_j.append(j)
 
-        edge_logits = torch.stack(edge_logits, dim=1)  # shape: [batch_size, num_edges, 2]
+        # Gather node embeddings for all edges
+        node_pairs_i = h[:, nodes_i]  # [batch_size, num_edges, hidden_dim]
+        node_pairs_j = h[:, nodes_j]  # [batch_size, num_edges, hidden_dim]
 
-        # Apply Gumbel-Softmax with learned temperature
+        # Concatenate node pairs and compute edge logits
+        edge_input = torch.cat([node_pairs_i, node_pairs_j], dim=-1)  # [batch_size, num_edges, hidden_dim*2]
+        edge_logits = self.final_layer(edge_input)  # [batch_size, num_edges, 2]
+
+        # Apply Gumbel-Softmax
         x = F.gumbel_softmax(edge_logits, tau=self.temperature.abs(), hard=True)[:, :, 0]
 
         # Convert to adjacency matrix
