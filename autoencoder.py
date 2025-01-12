@@ -134,7 +134,7 @@ class Decoder(nn.Module):
         return adjacency_logits
 
 
-"""class GIN(torch.nn.Module):
+class GIN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
         super().__init__()
         self.dropout = dropout
@@ -179,7 +179,7 @@ class Decoder(nn.Module):
         out = self.bn(out)
         out = self.fc(out)
         return out
-"""
+
 
 
 class GraphSAGEEncoder(nn.Module):
@@ -265,7 +265,7 @@ class VariationalAutoEncoder(nn.Module):
         super(VariationalAutoEncoder, self).__init__()
         self.n_max_nodes = n_max_nodes
         self.input_dim = input_dim
-        self.encoder = GraphSAGEEncoder(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
+        self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
         self.decoder = Decoder(latent_dim, stats_dim, node_emb_dim, edge_hidden_dim, n_layers_dec, n_max_nodes)
@@ -308,15 +308,22 @@ class VariationalAutoEncoder(nn.Module):
         logvar = self.fc_logvar(x_g)
         z = self.reparameterize(mu, logvar)
 
-        # Decoder now outputs adjacency logits, not adjacency directly
+        # Decoder outputs adjacency logits (not probabilities)
         adj_logits = self.decoder(z, stats)  # shape (B, n_nodes, n_nodes)
 
-        # data.A should be the "ground-truth" adjacency matrix (0/1), same shape as adj_logits
-        # If it's not the same shape, you might need to broadcast or reshape it
-        recon_loss = F.binary_cross_entropy_with_logits(adj_logits, data.A, reduction="mean")
+        # Ensure `data.A` is correctly shaped for BCE loss
+        target_adj = data.A.to(dtype=torch.float32)  # Convert to float
+        assert adj_logits.shape == target_adj.shape, "Adjacency shape mismatch!"
 
-        kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        # Binary cross-entropy loss (reconstruction loss)
+        recon_loss = F.binary_cross_entropy_with_logits(adj_logits, target_adj, reduction="mean")
+
+        # KL Divergence loss (corrected with batch normalization)
+        kld = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
+
+        # Final loss with beta weight
         loss = recon_loss + beta * kld
 
         return loss, recon_loss, kld
+
 
