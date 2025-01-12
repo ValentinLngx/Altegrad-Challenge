@@ -47,6 +47,7 @@ class ResidualBlock(nn.Module):
         super(ResidualBlock, self).__init__()
         self.linear1 = nn.Linear(in_dim, out_dim)
         self.linear2 = nn.Linear(out_dim, out_dim)
+        # Fix: Adjust LayerNorm to expect 3D input
         self.norm1 = nn.LayerNorm(out_dim)
         self.norm2 = nn.LayerNorm(out_dim)
         self.dropout = nn.Dropout(dropout)
@@ -56,19 +57,19 @@ class ResidualBlock(nn.Module):
         self.proj = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
 
     def forward(self, x):
-        # First sub-layer
+        # x shape: [batch_size, n_nodes, features]
         residual = x
+
+        # Apply LayerNorm along the feature dimension
         x = self.norm1(x)
         x = self.linear1(x)
         x = self.relu(x)
         x = self.dropout(x)
 
-        # Second sub-layer
         x = self.norm2(x)
         x = self.linear2(x)
         x = self.dropout(x)
 
-        # Add residual connection
         return x + self.proj(residual)
 
 
@@ -78,19 +79,15 @@ class GraphAttention(nn.Module):
         self.query = nn.Linear(in_dim, out_dim)
         self.key = nn.Linear(in_dim, out_dim)
         self.value = nn.Linear(in_dim, out_dim)
-        self.scale = np.sqrt(out_dim)
+        self.scale = math.sqrt(out_dim)
 
     def forward(self, x):
-        # x shape: [batch_size, n_nodes, in_dim]
-        q = self.query(x)  # [batch_size, n_nodes, out_dim]
-        k = self.key(x)  # [batch_size, n_nodes, out_dim]
-        v = self.value(x)  # [batch_size, n_nodes, out_dim]
+        q = self.query(x)
+        k = self.key(x)
+        v = self.value(x)
 
-        # Compute attention scores
         attention = torch.matmul(q, k.transpose(-2, -1)) / self.scale
         attention = F.softmax(attention, dim=-1)
-
-        # Apply attention to values
         return torch.matmul(attention, v)
 
 
@@ -100,46 +97,44 @@ class Decoder(nn.Module):
         self.n_layers = n_layers
         self.n_nodes = n_nodes
 
-        # Layer normalization for input
+        # Fix: Adjust LayerNorm to handle 3D input
         self.layer_norm = nn.LayerNorm(latent_dim + 7)
 
-        # Residual layers for processing node embeddings
+        # Initial projection to match dimensions
+        self.input_proj = nn.Linear(latent_dim + 7, hidden_dim)
+
+        # Residual layers
         self.residual_layers = nn.ModuleList([
-            ResidualBlock(
-                hidden_dim if i > 0 else latent_dim + 7,
-                hidden_dim,
-                dropout=0.1
-            ) for i in range(n_layers - 1)
+            ResidualBlock(hidden_dim, hidden_dim, dropout=0.1)
+            for _ in range(n_layers - 1)
         ])
 
-        # Attention mechanism
         self.attention = GraphAttention(hidden_dim, hidden_dim)
-
-        # Final layer to produce edge probabilities
         self.final_layer = nn.Linear(hidden_dim * 2, 2)
-
-        # Learnable temperature parameter
         self.temperature = nn.Parameter(torch.ones(1))
 
     def forward(self, x, stats):
-        # Concatenate and normalize inputs
-        x = torch.cat((x, stats), dim=-1)
+        # Concatenate inputs
+        batch_size = x.size(0)
+        x = torch.cat((x, stats), dim=-1)  # [batch_size, latent_dim + 7]
+
+        # Expand to node-level representations
+        x = x.unsqueeze(1).expand(-1, self.n_nodes, -1)  # [batch_size, n_nodes, latent_dim + 7]
+
+        # Apply layer norm
         x = self.layer_norm(x)
 
-        # Generate node embeddings
-        batch_size = x.size(0)
-        node_embeddings = x.unsqueeze(1).expand(-1, self.n_nodes, -1)
+        # Initial projection
+        h = self.input_proj(x)
 
         # Process through residual layers
-        h = node_embeddings
         for layer in self.residual_layers:
             h = layer(h)
 
-        # Apply attention mechanism
-        h = self.attention(h)  # [batch_size, n_nodes, hidden_dim]
+        # Apply attention
+        h = self.attention(h)
 
-        # Generate edge logits for all pairs at once
-        # Create node pairs for all possible edges
+        # Generate edge logits
         nodes_i = []
         nodes_j = []
         for i in range(self.n_nodes):
@@ -147,13 +142,11 @@ class Decoder(nn.Module):
                 nodes_i.append(i)
                 nodes_j.append(j)
 
-        # Gather node embeddings for all edges
-        node_pairs_i = h[:, nodes_i]  # [batch_size, num_edges, hidden_dim]
-        node_pairs_j = h[:, nodes_j]  # [batch_size, num_edges, hidden_dim]
+        node_pairs_i = h[:, nodes_i]
+        node_pairs_j = h[:, nodes_j]
 
-        # Concatenate node pairs and compute edge logits
-        edge_input = torch.cat([node_pairs_i, node_pairs_j], dim=-1)  # [batch_size, num_edges, hidden_dim*2]
-        edge_logits = self.final_layer(edge_input)  # [batch_size, num_edges, 2]
+        edge_input = torch.cat([node_pairs_i, node_pairs_j], dim=-1)
+        edge_logits = self.final_layer(edge_input)
 
         # Apply Gumbel-Softmax
         x = F.gumbel_softmax(edge_logits, tau=self.temperature.abs(), hard=True)[:, :, 0]
