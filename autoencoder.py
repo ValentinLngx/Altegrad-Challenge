@@ -47,48 +47,33 @@ class ResidualBlock(nn.Module):
         super(ResidualBlock, self).__init__()
         self.linear1 = nn.Linear(in_dim, out_dim)
         self.linear2 = nn.Linear(out_dim, out_dim)
-        # Fix: Adjust LayerNorm to expect 3D input
         self.norm1 = nn.LayerNorm(out_dim)
         self.norm2 = nn.LayerNorm(out_dim)
         self.dropout = nn.Dropout(dropout)
         self.relu = nn.ReLU()
-
-        # Add projection layer if dimensions don't match
         self.proj = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
 
     def forward(self, x):
-        # x shape: [batch_size, n_nodes, features]
         residual = x
-
-        # Apply LayerNorm along the feature dimension
         x = self.norm1(x)
         x = self.linear1(x)
         x = self.relu(x)
         x = self.dropout(x)
-
         x = self.norm2(x)
         x = self.linear2(x)
         x = self.dropout(x)
-
         return x + self.proj(residual)
 
 
-class GraphAttention(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super(GraphAttention, self).__init__()
-        self.query = nn.Linear(in_dim, out_dim)
-        self.key = nn.Linear(in_dim, out_dim)
-        self.value = nn.Linear(in_dim, out_dim)
-        self.scale = np.sqrt(out_dim)
+class SimpleAttention(nn.Module):
+    def __init__(self, hidden_dim):
+        super(SimpleAttention, self).__init__()
+        self.attention = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
-        q = self.query(x)
-        k = self.key(x)
-        v = self.value(x)
-
-        attention = torch.matmul(q, k.transpose(-2, -1)) / self.scale
-        attention = F.softmax(attention, dim=-1)
-        return torch.matmul(attention, v)
+        # x shape: [batch_size, n_nodes, hidden_dim]
+        weights = F.softmax(self.attention(x), dim=1)  # [batch_size, n_nodes, 1]
+        return x * weights  # [batch_size, n_nodes, hidden_dim]
 
 
 class Decoder(nn.Module):
@@ -97,59 +82,83 @@ class Decoder(nn.Module):
         self.n_layers = n_layers
         self.n_nodes = n_nodes
 
-        # Fix: Adjust LayerNorm to handle 3D input
-        self.layer_norm = nn.LayerNorm(latent_dim + 7)
+        # Initial projection with larger hidden dimension
+        self.input_proj = nn.Sequential(
+            nn.Linear(latent_dim + 7, hidden_dim * 2),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim * 2),
+            nn.Dropout(0.1)
+        )
 
-        # Initial projection to match dimensions
-        self.input_proj = nn.Linear(latent_dim + 7, hidden_dim)
+        # Reduce dimension gradually
+        self.dim_reduce = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(0.1)
+        )
 
-        # Residual layers
+        # Simplified residual blocks
         self.residual_layers = nn.ModuleList([
             ResidualBlock(hidden_dim, hidden_dim, dropout=0.1)
             for _ in range(n_layers - 1)
         ])
 
-        self.attention = GraphAttention(hidden_dim, hidden_dim)
-        self.final_layer = nn.Linear(hidden_dim * 2, 2)
-        self.temperature = nn.Parameter(torch.ones(1))
+        # Simplified attention
+        self.attention = SimpleAttention(hidden_dim)
+
+        # Edge prediction layers
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, 2)
+        )
+
+        # Initialize parameters with smaller values
+        self.apply(self._init_weights)
+
+        # Learnable but bounded temperature
+        self.temperature = nn.Parameter(torch.ones(1) * 0.5)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, gain=0.02)
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
 
     def forward(self, x, stats):
-        # Concatenate inputs
         batch_size = x.size(0)
-        x = torch.cat((x, stats), dim=-1)  # [batch_size, latent_dim + 7]
 
-        # Expand to node-level representations
-        x = x.unsqueeze(1).expand(-1, self.n_nodes, -1)  # [batch_size, n_nodes, latent_dim + 7]
+        # Concatenate and process input
+        x = torch.cat((x, stats), dim=-1)
+        x = x.unsqueeze(1).expand(-1, self.n_nodes, -1)
 
-        # Apply layer norm
-        x = self.layer_norm(x)
-
-        # Initial projection
+        # Initial projection and dimension reduction
         h = self.input_proj(x)
+        h = self.dim_reduce(h)
 
-        # Process through residual layers
+        # Process through residual layers with gradient scaling
         for layer in self.residual_layers:
-            h = layer(h)
+            h = h + 0.1 * layer(h)  # Scale residual connections
 
-        # Apply attention
+        # Apply simplified attention
         h = self.attention(h)
 
-        # Generate edge logits
-        nodes_i = []
-        nodes_j = []
+        # Generate edge predictions
+        edge_logits = []
         for i in range(self.n_nodes):
             for j in range(i + 1, self.n_nodes):
-                nodes_i.append(i)
-                nodes_j.append(j)
+                edge_input = torch.cat([h[:, i], h[:, j]], dim=-1)
+                edge_logit = self.edge_mlp(edge_input)
+                edge_logits.append(edge_logit)
 
-        node_pairs_i = h[:, nodes_i]
-        node_pairs_j = h[:, nodes_j]
+        edge_logits = torch.stack(edge_logits, dim=1)
 
-        edge_input = torch.cat([node_pairs_i, node_pairs_j], dim=-1)
-        edge_logits = self.final_layer(edge_input)
-
-        # Apply Gumbel-Softmax
-        x = F.gumbel_softmax(edge_logits, tau=self.temperature.abs(), hard=True)[:, :, 0]
+        # Bounded temperature for Gumbel-Softmax
+        temp = torch.clamp(self.temperature, min=0.1, max=2.0)
+        x = F.gumbel_softmax(edge_logits, tau=temp, hard=True)[:, :, 0]
 
         # Convert to adjacency matrix
         adj = torch.zeros(batch_size, self.n_nodes, self.n_nodes, device=x.device)
