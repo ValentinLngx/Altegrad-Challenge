@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from torch_geometric.nn import GINConv
 from torch_geometric.nn import global_add_pool
-from torch_geometric.nn import GATv2Conv
+from torch_geometric.nn import GATv2Conv, SAGEConv
 
 # Decoder
 """class Decoder(nn.Module):
@@ -181,6 +181,36 @@ class Decoder(nn.Module):
         return out
 """
 
+
+class GraphSAGEEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
+        super().__init__()
+        self.dropout = dropout
+        self.convs = nn.ModuleList()
+
+        # First SAGE layer
+        self.convs.append(SAGEConv(input_dim, hidden_dim))
+
+        # Additional SAGE layers
+        for _ in range(n_layers - 1):
+            self.convs.append(SAGEConv(hidden_dim, hidden_dim))
+
+        self.bn = nn.BatchNorm1d(hidden_dim)
+        self.fc = nn.Linear(hidden_dim, latent_dim)
+
+    def forward(self, data):
+        x, edge_index = data.x, data.edge_index
+        for conv in self.convs:
+            x = conv(x, edge_index)
+            x = F.relu(x)
+            x = F.dropout(x, self.dropout, training=self.training)
+
+        x = global_add_pool(x, data.batch)
+        x = self.bn(x)
+        x = self.fc(x)
+        return x
+
+
 class GATEncoder(nn.Module):
     """
     Example GAT-based encoder with multiple attention heads,
@@ -235,7 +265,7 @@ class VariationalAutoEncoder(nn.Module):
         super(VariationalAutoEncoder, self).__init__()
         self.n_max_nodes = n_max_nodes
         self.input_dim = input_dim
-        self.encoder = GATEncoder(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
+        self.encoder = GraphSAGEEncoder(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
         self.decoder = Decoder(latent_dim, stats_dim, node_emb_dim, edge_hidden_dim, n_layers_dec, n_max_nodes)
