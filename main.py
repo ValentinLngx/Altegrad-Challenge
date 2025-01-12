@@ -274,7 +274,6 @@ if args.train_denoiser:
 
             train_loss_all += x_g.size(0) * loss.item()
             train_count += x_g.size(0)
-            optimizer.step()
 
         denoise_model.eval()
         val_loss_all = 0
@@ -282,7 +281,7 @@ if args.train_denoiser:
         for data in val_loader:
             data = data.to(device)
             x_g = autoencoder.encode(data)
-            t = torch.randint(0, args.timesteps, (x_g.size(0),), device=device).long()
+            t = torch.randint(0, current_timesteps, (x_g.size(0),), device=device).long()
             loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, loss_type="huber")
             val_loss_all += x_g.size(0) * loss.item()
             val_count += x_g.size(0)
