@@ -23,7 +23,7 @@ from torch_geometric.loader import DataLoader
 
 from autoencoder import VariationalAutoEncoder
 from denoise_model import DenoiseNN, p_losses, sample, q_sample, test_gaussian_properties
-from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
+from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset, get_diffusion_parameters, modified_beta_schedule
 
 
 from torch.utils.data import Subset
@@ -54,7 +54,7 @@ parser.add_argument('--dropout', type=float, default=0.0, help="Dropout rate (fr
 parser.add_argument('--batch-size', type=int, default=256, help="Batch size for training, controlling the number of samples per gradient update (default: 256)")
 
 # Number of epochs for the autoencoder training
-parser.add_argument('--epochs-autoencoder', type=int, default=200, help="Number of training epochs for the autoencoder (default: 200)")
+parser.add_argument('--epochs-autoencoder', type=int, default=400, help="Number of training epochs for the autoencoder (default: 200)")
 
 # Hidden dimension size for the encoder network
 parser.add_argument('--hidden-dim-encoder', type=int, default=64, help="Hidden dimension size for encoder layers (default: 64)")
@@ -78,7 +78,7 @@ parser.add_argument('--n-layers-decoder', type=int, default=3, help="Number of l
 parser.add_argument('--spectral-emb-dim', type=int, default=10, help="Dimensionality of spectral embeddings for representing graph structures (default: 10)")
 
 # Number of training epochs for the denoising model
-parser.add_argument('--epochs-denoise', type=int, default=100, help="Number of training epochs for the denoising model (default: 100)")
+parser.add_argument('--epochs-denoise', type=int, default=200, help="Number of training epochs for the denoising model (default: 100)")
 
 # Number of timesteps in the diffusion
 parser.add_argument('--timesteps', type=int, default=500, help="Number of timesteps for the diffusion (default: 500)")
@@ -107,6 +107,10 @@ parser.add_argument('--train-gan', action='store_true', default=True,help="Flag 
 parser.add_argument('--gan-lambda', type=float, default=0.1,help="Weight for the adversarial loss term (default: 0.1).")
 
 parser.add_argument('--gan-n-critic', type=int, default=5,help="Number of critic/discriminator updates per generator update (WGAN) (default: 5).")
+
+parser.add_argument('--lambda_gp', type=float, default=10.0, help='Gradient penalty coefficient')
+
+parser.add_argument('--lr_disc', type=float, default=1e-4, help='Discriminator learning rate')
 #########
 
 
@@ -126,7 +130,7 @@ train_loader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
 val_loader = DataLoader(validset, batch_size=args.batch_size, shuffle=False)
 test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 
-class LatentDiscriminator(nn.Module):
+"""class LatentDiscriminator(nn.Module):
     def __init__(self, latent_dim=32):
         super(LatentDiscriminator, self).__init__()
         self.model = nn.Sequential(
@@ -148,8 +152,21 @@ if args.train_gan:
         discriminator.parameters(),
         lr=args.lr,
         betas=(0.5, 0.9)  # Commonly used betas for WGAN
-    )
+    )"""
 
+class Discriminator(nn.Module):
+    def __init__(self, latent_dim, hidden_dim=512):
+        super(Discriminator, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, z):
+        return self.net(z)
 
 def wgan_critic_loss(real_score, fake_score):
     """
@@ -187,84 +204,91 @@ def gradient_penalty(discriminator, real_samples, fake_samples, device, gp_coef=
     gp = gp_coef * ((gradient_norm - 1) ** 2).mean()
     return gp
 
-
-
+# Initialize models
+discriminator = Discriminator(latent_dim=args.latent_dim).to(device)
 # initialize VGAE model
-autoencoder = VariationalAutoEncoder(args.spectral_emb_dim+1, args.hidden_dim_encoder, args.hidden_dim_decoder, args.latent_dim, args.n_layers_encoder, args.n_layers_decoder, args.n_max_nodes).to(device)
+autoencoder = VariationalAutoEncoder(args.spectral_emb_dim + 1, args.hidden_dim_encoder, args.hidden_dim_decoder,
+                                     args.latent_dim, args.n_layers_encoder, args.n_layers_decoder,
+                                     args.n_max_nodes).to(device)
 
 optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
+optimizer_disc = torch.optim.Adam(discriminator.parameters(), lr=args.lr_disc)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
-
 
 # Train VGAE model
 if args.train_autoencoder:
     best_val_loss = np.inf
-    for epoch in range(1, args.epochs_autoencoder+1):
+    for epoch in range(1, args.epochs_autoencoder + 1):
         autoencoder.train()
         train_loss_all = 0
         train_count = 0
         train_loss_all_recon = 0
         train_loss_all_kld = 0
-        cnt_train=0
+        train_loss_all_gan = 0
+        cnt_train = 0
+
         if args.train_gan:
             discriminator.train()
 
         for data in train_loader:
             data = data.to(device)
+
             if args.train_gan:
+                # Train Discriminator
                 for _ in range(args.gan_n_critic):
                     optimizer_disc.zero_grad()
 
-                    # ---- Real latent samples from the prior N(0, I) ----
+                    # Real latent samples from prior N(0, I)
                     real_z = torch.randn(data.num_graphs, args.latent_dim, device=device)
 
-                    # ---- Fake latent samples from autoencoder ----
-                    # Pass data through encoder to get mu/logvar -> reparameterize
-                    x_g = autoencoder.encoder(data)  # encoder output
+                    # Fake latent samples from encoder
+                    x_g = autoencoder.encoder(data)
                     mu = autoencoder.fc_mu(x_g)
                     logvar = autoencoder.fc_logvar(x_g)
                     fake_z = autoencoder.reparameterize(mu, logvar)
 
-                    # Critic outputs
+                    # Compute critic scores
                     real_score = discriminator(real_z)
-                    fake_score = discriminator(fake_z.detach())  # detach so AE grads won't flow here
+                    fake_score = discriminator(fake_z.detach())
 
-                    # WGAN critic loss + gradient penalty
+                    # WGAN loss + gradient penalty
                     disc_loss = wgan_critic_loss(real_score, fake_score)
-                    gp = gradient_penalty(discriminator, real_z.data, fake_z.data, device)
+                    gp = gradient_penalty(discriminator, real_z.data, fake_z.data, device, args.lambda_gp)
                     disc_loss_total = disc_loss + gp
 
                     disc_loss_total.backward()
                     optimizer_disc.step()
 
+            # Train Autoencoder
             optimizer.zero_grad()
-            loss, recon, kld  = autoencoder.loss_function(data, data.stats)
+            loss, recon, kld = autoencoder.loss_function(data, data.stats)
 
             if args.train_gan:
-                # Recompute the same fake_z without .detach() so that generator can get grads
+                # Get latent codes again for generator update
                 x_g = autoencoder.encoder(data)
                 mu = autoencoder.fc_mu(x_g)
                 logvar = autoencoder.fc_logvar(x_g)
                 fake_z = autoencoder.reparameterize(mu, logvar)
 
-                # Critic scores for the "fake" latent
+                # Get critic score for generator update
                 fake_score_g = discriminator(fake_z)
-                gen_loss = wgan_gen_loss(fake_score_g)  # = - E[D(fake_z)]
+                gen_loss = wgan_gen_loss(fake_score_g)
 
-                # Combine AE loss and WGAN generator loss
-                # Use args.gan_lambda to weight the adversarial part
+                # Combined loss
                 total_loss = loss + args.gan_lambda * gen_loss
+                train_loss_all_gan += gen_loss.item()
             else:
                 total_loss = loss
 
+            total_loss.backward()
+            train_loss_all += loss.item()
             train_loss_all_recon += recon.item()
             train_loss_all_kld += kld.item()
-            cnt_train+=1
-            loss.backward()
-            train_loss_all += loss.item()
-            train_count += torch.max(data.batch)+1
+            train_count += torch.max(data.batch) + 1
+            cnt_train += 1
             optimizer.step()
 
+        # Validation phase
         autoencoder.eval()
         val_loss_all = 0
         val_count = 0
@@ -274,42 +298,48 @@ if args.train_autoencoder:
 
         for data in val_loader:
             data = data.to(device)
-            loss, recon, kld  = autoencoder.loss_function(data, data.stats)
+            loss, recon, kld = autoencoder.loss_function(data, data.stats)
+            val_loss_all += loss.item()
             val_loss_all_recon += recon.item()
             val_loss_all_kld += kld.item()
-            val_loss_all += loss.item()
-            cnt_val+=1
-            val_count += torch.max(data.batch)+1
+            val_count += torch.max(data.batch) + 1
+            cnt_val += 1
 
-            # Print logging info
-            dt_t = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            print('{} Epoch: {:03d} | Train Loss: {:.5f} (recon={:.2f}, kld={:.2f}) | '
-                  'Val Loss: {:.5f} (recon={:.2f}, kld={:.2f})'.format(
-                dt_t, epoch,
-                train_loss_all / cnt_train,
-                train_loss_all_recon / cnt_train,
-                train_loss_all_kld / cnt_train,
-                val_loss_all / cnt_val,
-                val_loss_all_recon / cnt_val,
-                val_loss_all_kld / cnt_val))
+        # Print logging info
+        dt_t = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        log_str = '{} Epoch: {:03d} | Train Loss: {:.5f} (recon={:.2f}, kld={:.2f}'.format(
+            dt_t, epoch,
+            train_loss_all / cnt_train,
+            train_loss_all_recon / cnt_train,
+            train_loss_all_kld / cnt_train)
 
-            scheduler.step()
+        if args.train_gan:
+            log_str += f', gan={train_loss_all_gan / cnt_train:.2f}'
 
-            # Save best autoencoder
-            if best_val_loss >= val_loss_all:
-                best_val_loss = val_loss_all
-                torch.save({
-                    'state_dict': autoencoder.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                }, 'autoencoder.pth.tar')
+        log_str += f') | Val Loss: {val_loss_all / cnt_val:.5f} (recon={val_loss_all_recon / cnt_val:.2f}, kld={val_loss_all_kld / cnt_val:.2f})'
+        print(log_str)
+
+        scheduler.step()
+
+        # Save best model
+        if best_val_loss >= val_loss_all:
+            best_val_loss = val_loss_all
+            torch.save({
+                'state_dict': autoencoder.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'discriminator': discriminator.state_dict() if args.train_gan else None,
+                'optimizer_disc': optimizer_disc.state_dict() if args.train_gan else None,
+            }, 'autoencoder.pth.tar')
 
 else:
     checkpoint = torch.load('autoencoder.pth.tar')
     autoencoder.load_state_dict(checkpoint['state_dict'])
+    if args.train_gan and 'discriminator' in checkpoint:
+        discriminator.load_state_dict(checkpoint['discriminator'])
 
 autoencoder.eval()
 
-# define beta schedule
+"""# define beta schedule
 betas = linear_beta_schedule(timesteps=args.timesteps)
 
 # define alphas
@@ -324,6 +354,17 @@ sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
 
 # calculations for posterior q(x_{t-1} | x_t, x_0)
 posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+"""
+diff_params = get_diffusion_parameters(args.timesteps, beta_schedule="cosine")
+betas = diff_params['betas']
+alphas = diff_params['alphas']
+alphas_cumprod = diff_params['alphas_cumprod']
+alphas_cumprod_prev = diff_params['alphas_cumprod_prev']
+sqrt_recip_alphas = diff_params['sqrt_recip_alphas']
+sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod']
+sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod']
+posterior_variance = diff_params['posterior_variance']
+
 
 # initialize denoising model
 denoise_model = DenoiseNN(input_dim=args.latent_dim, hidden_dim=args.hidden_dim_denoise, n_layers=args.n_layers_denoise, n_cond=args.n_condition, d_cond=args.dim_condition).to(device)
@@ -341,14 +382,15 @@ if args.train_denoiser:
         train_count = 0
 
         # Recalculate diffusion parameters with current_timesteps
-        betas = linear_beta_schedule(timesteps=current_timesteps)
-        alphas = 1. - betas
-        alphas_cumprod = torch.cumprod(alphas, axis=0)
-        alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
-        sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
-        sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-        sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
-        posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+        diff_params = get_diffusion_parameters(current_timesteps, beta_schedule="cosine")
+        betas = diff_params['betas']
+        alphas = diff_params['alphas']
+        alphas_cumprod = diff_params['alphas_cumprod']
+        alphas_cumprod_prev = diff_params['alphas_cumprod_prev']
+        sqrt_recip_alphas = diff_params['sqrt_recip_alphas']
+        sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod']
+        sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod']
+        posterior_variance = diff_params['posterior_variance']
 
         for data in train_loader:
             data = data.to(device)
@@ -364,19 +406,20 @@ if args.train_denoiser:
             test_results = test_gaussian_properties(z_T)
 
             # If not Gaussian enough and not at max timesteps, increase timesteps
-            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.1) and current_timesteps < 20000:
-                current_timesteps = min(current_timesteps + 100, 20000)
+            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.15) and current_timesteps < 50000:
+                current_timesteps = min(current_timesteps + 100, 50000)
                 print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
                 print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
                 # Recalculate diffusion parameters with new timesteps
-                betas = linear_beta_schedule(timesteps=current_timesteps)
-                alphas = 1. - betas
-                alphas_cumprod = torch.cumprod(alphas, axis=0)
-                alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
-                sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
-                sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-                sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
-                posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+                diff_params = get_diffusion_parameters(current_timesteps, beta_schedule="cosine")
+                betas = diff_params['betas']
+                alphas = diff_params['alphas']
+                alphas_cumprod = diff_params['alphas_cumprod']
+                alphas_cumprod_prev = diff_params['alphas_cumprod_prev']
+                sqrt_recip_alphas = diff_params['sqrt_recip_alphas']
+                sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod']
+                sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod']
+                posterior_variance = diff_params['posterior_variance']
 
             # Sample random timestep for training
             t = torch.randint(0, current_timesteps, (x_g.size(0),), device=device).long()
