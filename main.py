@@ -205,6 +205,7 @@ scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
 # Train denoising model
 if args.train_denoiser:
     best_val_loss = np.inf
+    current_timesteps = args.timesteps
     for epoch in range(1, args.epochs_denoise+1):
         denoise_model.train()
         train_loss_all = 0
