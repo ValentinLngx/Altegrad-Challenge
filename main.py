@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 
 from autoencoder import VariationalAutoEncoder
-from denoise_model import DenoiseNN, p_losses, sample
+from denoise_model import DenoiseNN, p_losses, sample, q_sample, test_gaussian_properties
 from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
 
 
@@ -333,35 +333,79 @@ scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
 # Train denoising model
 if args.train_denoiser:
     best_val_loss = np.inf
-    for epoch in range(1, args.epochs_denoise+1):
+    current_timesteps = args.timesteps
+
+    for epoch in range(1, args.epochs_denoise + 1):
         denoise_model.train()
         train_loss_all = 0
         train_count = 0
+
+        # Recalculate diffusion parameters with current_timesteps
+        betas = linear_beta_schedule(timesteps=current_timesteps)
+        alphas = 1. - betas
+        alphas_cumprod = torch.cumprod(alphas, axis=0)
+        alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
+        sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
+        sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
+        sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
+        posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+
         for data in train_loader:
             data = data.to(device)
             optimizer.zero_grad()
             x_g = autoencoder.encode(data)
-            t = torch.randint(0, args.timesteps, (x_g.size(0),), device=device).long()
-            loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, loss_type="huber")
+
+            # Test Gaussian properties of fully noised latent
+            t_final = torch.full((x_g.size(0),), current_timesteps - 1, device=device, dtype=torch.long)
+            noise = torch.randn_like(x_g)
+            z_T = q_sample(x_g, t_final, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=noise)
+
+            # Test if z_T is Gaussian
+            test_results = test_gaussian_properties(z_T)
+
+            # If not Gaussian enough and not at max timesteps, increase timesteps
+            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.1) and current_timesteps < 4000:
+                current_timesteps = min(current_timesteps + 100, 4000)
+                print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
+                print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
+                # Recalculate diffusion parameters with new timesteps
+                betas = linear_beta_schedule(timesteps=current_timesteps)
+                alphas = 1. - betas
+                alphas_cumprod = torch.cumprod(alphas, axis=0)
+                alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
+                sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
+                sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
+                sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
+                posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+
+            # Sample random timestep for training
+            t = torch.randint(0, current_timesteps, (x_g.size(0),), device=device).long()
+
+            # Calculate loss and update model
+            loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod,
+                            sqrt_one_minus_alphas_cumprod, loss_type="huber")
             loss.backward()
             train_loss_all += x_g.size(0) * loss.item()
             train_count += x_g.size(0)
             optimizer.step()
 
+        # Validation loop (using current_timesteps)
         denoise_model.eval()
         val_loss_all = 0
         val_count = 0
         for data in val_loader:
             data = data.to(device)
             x_g = autoencoder.encode(data)
-            t = torch.randint(0, args.timesteps, (x_g.size(0),), device=device).long()
-            loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, loss_type="huber")
+            t = torch.randint(0, current_timesteps, (x_g.size(0),), device=device).long()
+            loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod,
+                            sqrt_one_minus_alphas_cumprod, loss_type="huber")
             val_loss_all += x_g.size(0) * loss.item()
             val_count += x_g.size(0)
 
         if epoch % 5 == 0:
             dt_t = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            print('{} Epoch: {:04d}, Train Loss: {:.5f}, Val Loss: {:.5f}'.format(dt_t, epoch, train_loss_all/train_count, val_loss_all/val_count))
+            print('{} Epoch: {:04d}, Train Loss: {:.5f}, Val Loss: {:.5f}, Timesteps: {}'.format(
+                dt_t, epoch, train_loss_all / train_count, val_loss_all / val_count, current_timesteps))
 
         scheduler.step()
 
@@ -369,11 +413,13 @@ if args.train_denoiser:
             best_val_loss = val_loss_all
             torch.save({
                 'state_dict': denoise_model.state_dict(),
-                'optimizer' : optimizer.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'current_timesteps': current_timesteps  # Save the final number of timesteps
             }, 'denoise_model.pth.tar')
 else:
     checkpoint = torch.load('denoise_model.pth.tar')
     denoise_model.load_state_dict(checkpoint['state_dict'])
+    current_timesteps = checkpoint.get('current_timesteps', args.timesteps)  # Load saved timesteps
 
 denoise_model.eval()
 

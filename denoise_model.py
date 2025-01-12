@@ -2,12 +2,78 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import scipy.stats as stats
+import numpy as np
 
 def extract(a, t, x_shape):
     batch_size = t.shape[0]
     out = a.gather(-1, t.cpu())
     return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
 
+###########
+def test_gaussian_properties(z_T, significance_level=0.05):
+    """Test if z_T follows N(0,I)"""
+    z_np = z_T.cpu().detach().numpy()
+
+    # Test for zero mean
+    mean_test = np.mean(z_np, axis=0)
+    mean_p_value = stats.ttest_1samp(z_np, 0).pvalue
+
+    # Test for unit variance
+    var_test = np.var(z_np, axis=0)
+    var_p_value = stats.chi2.sf((z_np.shape[0] - 1) * var_test, df=z_np.shape[0] - 1)
+
+    # Mardia's test for multivariate normality
+    def mardia_test(data):
+        n = data.shape[0]
+        p = data.shape[1]
+        data_centered = data - np.mean(data, axis=0)
+        S = np.cov(data_centered.T)
+        S_inv = np.linalg.inv(S)
+
+        # Skewness
+        b1p = np.mean([np.sum((data_centered @ S_inv @ data_centered[j].T) ** 3)
+                       for j in range(n)])
+        skew_stat = (n / 6) * b1p
+        skew_df = p * (p + 1) * (p + 2) / 6
+        skew_p_value = stats.chi2.sf(skew_stat, skew_df)
+
+        # Kurtosis
+        b2p = np.mean([np.sum((data_centered @ S_inv @ data_centered[j].T) ** 2)
+                       for j in range(n)])
+        kurt_stat = (b2p - p * (p + 2)) / np.sqrt(8 * p * (p + 2) / n)
+        kurt_p_value = 2 * (1 - stats.norm.cdf(abs(kurt_stat)))
+
+        return skew_p_value, kurt_p_value
+
+    mardia_skew_p, mardia_kurt_p = mardia_test(z_np)
+
+    # Calculate overall confidence score
+    confidence_score = np.mean([
+        np.mean(mean_p_value),
+        np.mean(var_p_value),
+        mardia_skew_p,
+        mardia_kurt_p
+    ])
+
+    is_gaussian = all([
+        np.all(mean_p_value > significance_level),
+        np.all(var_p_value > significance_level),
+        mardia_skew_p > significance_level,
+        mardia_kurt_p > significance_level
+    ])
+
+    return {
+        'is_gaussian': is_gaussian,
+        'confidence_score': confidence_score,
+        'details': {
+            'mean_p_value': mean_p_value,
+            'var_p_value': var_p_value,
+            'mardia_skew_p': mardia_skew_p,
+            'mardia_kurt_p': mardia_kurt_p
+        }
+    }
+###########
 
 # forward diffusion (using the nice property)
 def q_sample(x_start, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=None):
@@ -20,7 +86,6 @@ def q_sample(x_start, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noi
     )
 
     return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
-
 
 # Loss function for denoising
 def p_losses(denoise_model, x_start, t, cond, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=None, loss_type="l1"):
@@ -143,6 +208,7 @@ def p_sample_loop(model, cond, timesteps, betas, shape):
     b = shape[0]
     # start from pure noise (for each example in the batch)
     img = torch.randn(shape, device=device)
+
     imgs = []
 
     for i in reversed(range(0, timesteps)):
