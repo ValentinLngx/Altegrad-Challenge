@@ -6,7 +6,6 @@ import scipy as sp
 import scipy.sparse
 import torch
 import torch.nn.functional as F
-import community as community_louvain
 
 from torch import Tensor
 from torch.utils.data import Dataset

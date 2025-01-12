@@ -41,7 +41,7 @@ Returns:
 parser = argparse.ArgumentParser(description='Configuration for the NeuralGraphGenerator model')
 
 # Learning rate
-parser.add_argument('--lr', type=float, default=5e-5) 
+parser.add_argument('--lr', type=float, default=1e-3)
 
 # Dropout rate
 parser.add_argument('--dropout', type=float, default=0.0)
