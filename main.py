@@ -22,8 +22,8 @@ import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 
 from autoencoder import VariationalAutoEncoder
-from denoise_model import DenoiseNN, p_losses, sample, ImprovedDenoiseNN
-from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset
+from denoise_model import DenoiseNN, p_losses, sample, ImprovedDenoiseNN, test_gaussian_properties, q_sample
+from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset, get_diffusion_parameters, modified_beta_schedule
 
 
 from torch.utils.data import Subset
@@ -181,21 +181,15 @@ autoencoder.eval()
 
 
 
-# define beta schedule
-betas = linear_beta_schedule(timesteps=args.timesteps)
-
-# define alphas
-alphas = 1. - betas
-alphas_cumprod = torch.cumprod(alphas, axis=0)
-alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
-sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
-
-# calculations for diffusion q(x_t | x_{t-1}) and others
-sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
-
-# calculations for posterior q(x_{t-1} | x_t, x_0)
-posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+diff_params = get_diffusion_parameters(args.timesteps, beta_schedule="cosine")
+betas = diff_params['betas']
+alphas = diff_params['alphas']
+alphas_cumprod = diff_params['alphas_cumprod']
+alphas_cumprod_prev = diff_params['alphas_cumprod_prev']
+sqrt_recip_alphas = diff_params['sqrt_recip_alphas']
+sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod']
+sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod']
+posterior_variance = diff_params['posterior_variance']
 
 # initialize denoising model
 denoise_model = ImprovedDenoiseNN(
@@ -215,11 +209,51 @@ if args.train_denoiser:
         denoise_model.train()
         train_loss_all = 0
         train_count = 0
+
+        # Recalculate diffusion parameters with current_timesteps
+        diff_params = get_diffusion_parameters(current_timesteps, beta_schedule="cosine")
+        betas = diff_params['betas']
+        alphas = diff_params['alphas']
+        alphas_cumprod = diff_params['alphas_cumprod']
+        alphas_cumprod_prev = diff_params['alphas_cumprod_prev']
+        sqrt_recip_alphas = diff_params['sqrt_recip_alphas']
+        sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod']
+        sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod']
+        posterior_variance = diff_params['posterior_variance']
+
         for data in train_loader:
             data = data.to(device)
             optimizer.zero_grad()
             x_g = autoencoder.encode(data)
-            t = torch.randint(0, args.timesteps, (x_g.size(0),), device=device).long()
+
+            # Test Gaussian properties of fully noised latent
+            t_final = torch.full((x_g.size(0),), current_timesteps - 1, device=device, dtype=torch.long)
+            noise = torch.randn_like(x_g)
+            z_T = q_sample(x_g, t_final, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=noise)
+
+            # Test if z_T is Gaussian
+            test_results = test_gaussian_properties(z_T)
+
+            # If not Gaussian enough and not at max timesteps, increase timesteps
+            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.2) and current_timesteps < 100000:
+                current_timesteps = min(current_timesteps + 100, 100000)
+                print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
+                print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
+                # Recalculate diffusion parameters with new timesteps
+                diff_params = get_diffusion_parameters(current_timesteps, beta_schedule="cosine")
+                betas = diff_params['betas']
+                alphas = diff_params['alphas']
+                alphas_cumprod = diff_params['alphas_cumprod']
+                alphas_cumprod_prev = diff_params['alphas_cumprod_prev']
+                sqrt_recip_alphas = diff_params['sqrt_recip_alphas']
+                sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod']
+                sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod']
+                posterior_variance = diff_params['posterior_variance']
+
+            # Sample random timestep for training
+            t = torch.randint(0, current_timesteps, (x_g.size(0),), device=device).long()
+
+
             loss = p_losses(
                 denoise_model,
                 x_g,

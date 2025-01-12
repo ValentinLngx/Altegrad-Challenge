@@ -224,5 +224,61 @@ def sigmoid_beta_schedule(timesteps):
 
 
 
+def modified_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02, schedule_type="quadratic"):
+    """
+    Modified beta schedule with different options for better Gaussian properties
+    """
+    if schedule_type == "quadratic":
+        # Quadratic beta schedule for smoother progression
+        betas = torch.linspace(beta_start ** 0.5, beta_end ** 0.5, timesteps) ** 2
+    elif schedule_type == "cosine":
+        # Cosine schedule for better end-distribution properties
+        steps = timesteps + 1
+        x = torch.linspace(0, timesteps, steps)
+        alphas_cumprod = torch.cos(((x / timesteps) + 0.008) / (1 + 0.008) * torch.pi * 0.5) ** 2
+        alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+        betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+        return torch.clip(betas, 0.0001, 0.9999)
+    else:
+        # Enhanced linear schedule with smoothing
+        betas = torch.linspace(beta_start, beta_end, timesteps)
+
+    return betas
+
+
+def get_diffusion_parameters(timesteps, beta_schedule="cosine"):
+    """
+    Calculate diffusion parameters with enhanced numerical stability
+    """
+    # Get betas using modified schedule
+    betas = modified_beta_schedule(timesteps, schedule_type=beta_schedule)
+
+    # Calculate basic parameters with improved numerical stability
+    alphas = 1. - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+    # Add small epsilon to prevent numerical instability
+    eps = 1e-8
+    alphas_cumprod = torch.clip(alphas_cumprod, eps, 1.0)
+
+    # Calculate remaining parameters
+    alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
+    sqrt_recip_alphas = torch.sqrt(1.0 / (alphas + eps))
+    sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
+    sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
+
+    # More numerically stable posterior variance calculation
+    posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod + eps)
+
+    return {
+        'betas': betas,
+        'alphas': alphas,
+        'alphas_cumprod': alphas_cumprod,
+        'alphas_cumprod_prev': alphas_cumprod_prev,
+        'sqrt_recip_alphas': sqrt_recip_alphas,
+        'sqrt_alphas_cumprod': sqrt_alphas_cumprod,
+        'sqrt_one_minus_alphas_cumprod': sqrt_one_minus_alphas_cumprod,
+        'posterior_variance': posterior_variance
+    }
 
 
