@@ -160,7 +160,7 @@ class GIN(torch.nn.Module):
             GINConv(
                 nn.Sequential(
                     nn.Linear(input_dim, hidden_dim),
-                    F.silu(),
+                    nn.SiLU(),
                     nn.BatchNorm1d(hidden_dim),
                     nn.Linear(hidden_dim, hidden_dim),
                     nn.LeakyReLU(0.2),
@@ -172,10 +172,10 @@ class GIN(torch.nn.Module):
                 GINConv(
                     nn.Sequential(
                         nn.Linear(hidden_dim, hidden_dim),
-                        F.silu(),
+                        nn.SiLU(),
                         nn.BatchNorm1d(hidden_dim),
                         nn.Linear(hidden_dim, hidden_dim),
-                        nn.LeakyReLU(0.2),
+                        nn.SiLU(),
                     )
                 )
             )
