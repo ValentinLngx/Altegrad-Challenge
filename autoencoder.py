@@ -252,10 +252,9 @@ class VariationalAutoEncoder(nn.Module):
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
 
-        #recon = F.l1_loss(adj, data.A, reduction="mean")
-        recon = F.binary_cross_entropy(adj, data.A, reduction="mean")
-
+        recon = F.l1_loss(adj, data.A, reduction="mean")
+        mae = F.l1_loss(adj, data.A, reduction="mean")
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = recon + beta * kld
+        loss = recon + beta * kld + mae
 
-        return loss, recon, kld
+        return loss, recon, kld, mae
