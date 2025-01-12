@@ -77,7 +77,7 @@ class Decoder(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_dim, hidden_dim, dropout=0.01):
+    def __init__(self, in_dim, hidden_dim, dropout=0.05):
         super(ResidualBlock, self).__init__()
         self.fc1 = nn.Linear(in_dim, hidden_dim)
         self.ln1 = nn.LayerNorm(hidden_dim)
@@ -245,7 +245,7 @@ class VariationalAutoEncoder(nn.Module):
         adj = self.decoder(mu, stats)
         return adj
 
-    def loss_function(self, data, stats, beta=0.05):
+    def loss_function(self, data, stats, beta=0.05, alpha=1):
         x_g = self.encoder(data)
         mu = self.fc_mu(x_g)
         logvar = self.fc_logvar(x_g)
@@ -255,6 +255,6 @@ class VariationalAutoEncoder(nn.Module):
         recon = F.l1_loss(adj, data.A, reduction="mean")
         mae = F.l1_loss(adj, data.A, reduction="mean")
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = recon + beta * kld + mae
+        loss = recon + beta * kld + alpha*mae
 
         return loss, recon, kld, mae

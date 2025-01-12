@@ -17,7 +17,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 from torch_geometric.data import Data
-
+from sklearn.preprocessing import StandardScaler
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 
@@ -25,7 +25,7 @@ from autoencoder import VariationalAutoEncoder
 from denoise_model import DenoiseNN, p_losses, sample, ImprovedDenoiseNN, test_gaussian_properties, q_sample
 from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset, get_diffusion_parameters, modified_beta_schedule
 
-
+scaler = StandardScaler()
 from torch.utils.data import Subset
 np.random.seed(13)
 
@@ -122,6 +122,44 @@ optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
 
 
+def drop_edges(data, drop_rate=0.05):
+    """
+    Randomly remove a fraction of edges to increase robustness.
+    """
+    edge_index = data.edge_index
+    if edge_index is None or edge_index.numel() == 0:
+        return data  # No edges to drop
+
+    num_edges = edge_index.size(1)
+    # Create a random mask that keeps edges with probability (1 - drop_rate)
+    keep_mask = torch.rand(num_edges, device=edge_index.device) > drop_rate
+    data.edge_index = edge_index[:, keep_mask]
+    return data
+
+def mask_node_features(data, mask_rate=0.05):
+    """
+    Randomly zero out a fraction of the node features.
+    """
+    if not hasattr(data, "x") or data.x is None:
+        return data  # No features to mask
+
+    x = data.x
+    # Create a mask the same shape as x
+    mask = torch.rand_like(x) < mask_rate
+    # Zero out masked positions
+    x[mask] = 0.0
+    data.x = x
+    return data
+
+def augment_data(data, edge_drop_rate=0.05, feature_mask_rate=0.05):
+    """
+    Combine multiple small augmentations.
+    """
+    data = drop_edges(data, edge_drop_rate)
+    data = mask_node_features(data, feature_mask_rate)
+    return data
+
+
 # Train VGAE model
 if args.train_autoencoder:
     best_val_loss = np.inf
@@ -135,6 +173,7 @@ if args.train_autoencoder:
         cnt_train=0
 
         for data in train_loader:
+            data = augment_data(data, edge_drop_rate=0.05, feature_mask_rate=0.05)
             data = data.to(device)
             optimizer.zero_grad()
             loss, recon, kld, mae  = autoencoder.loss_function(data, data.stats)
