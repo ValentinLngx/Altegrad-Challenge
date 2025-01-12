@@ -364,8 +364,8 @@ if args.train_denoiser:
             test_results = test_gaussian_properties(z_T)
 
             # If not Gaussian enough and not at max timesteps, increase timesteps
-            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.1) and current_timesteps < 4000:
-                current_timesteps = min(current_timesteps + 100, 4000)
+            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.1) and current_timesteps < 20000:
+                current_timesteps = min(current_timesteps + 100, 20000)
                 print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
                 print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
                 # Recalculate diffusion parameters with new timesteps
