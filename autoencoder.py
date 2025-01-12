@@ -79,7 +79,7 @@ class GraphAttention(nn.Module):
         self.query = nn.Linear(in_dim, out_dim)
         self.key = nn.Linear(in_dim, out_dim)
         self.value = nn.Linear(in_dim, out_dim)
-        self.scale = math.sqrt(out_dim)
+        self.scale = np.sqrt(out_dim)
 
     def forward(self, x):
         q = self.query(x)
