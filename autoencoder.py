@@ -41,200 +41,112 @@ from torch_geometric.nn import global_add_pool
         return adj
 """
 
-
-class ResidualBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, dropout=0.1):
-        super(ResidualBlock, self).__init__()
-        self.linear1 = nn.Linear(in_dim, out_dim)
-        self.linear2 = nn.Linear(out_dim, out_dim)
-        self.norm1 = nn.LayerNorm(out_dim)
-        self.norm2 = nn.LayerNorm(out_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.relu = nn.ReLU()
-        self.proj = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
-
-    def forward(self, x):
-        residual = x
-        x = self.norm1(x)
-        x = self.linear1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.norm2(x)
-        x = self.linear2(x)
-        x = self.dropout(x)
-        return x + self.proj(residual)
-
-
-class SimpleAttention(nn.Module):
-    def __init__(self, hidden_dim):
-        super(SimpleAttention, self).__init__()
-        self.attention = nn.Linear(hidden_dim, 1)
-
-    def forward(self, x):
-        # x shape: [batch_size, n_nodes, hidden_dim]
-        weights = F.softmax(self.attention(x), dim=1)  # [batch_size, n_nodes, 1]
-        return x * weights  # [batch_size, n_nodes, hidden_dim]
-
-
 class Decoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes):
         super(Decoder, self).__init__()
         self.n_layers = n_layers
         self.n_nodes = n_nodes
 
-        # Initial projection with larger hidden dimension
-        self.input_proj = nn.Sequential(
-            nn.Linear(latent_dim + 7, hidden_dim * 2),
-            nn.ReLU(),
-            nn.LayerNorm(hidden_dim * 2),
-            nn.Dropout(0.1)
-        )
+        # Adjusting the input size of the first layer to account for the concatenated stats vector
+        mlp_layers = [nn.Linear(latent_dim + 7, hidden_dim)] + [
+            nn.Linear(hidden_dim, hidden_dim) for _ in range(n_layers - 2)
+        ]
+        mlp_layers.append(nn.Linear(hidden_dim, 2 * n_nodes * (n_nodes - 1) // 2))
 
-        # Reduce dimension gradually
-        self.dim_reduce = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(hidden_dim),
-            nn.Dropout(0.1)
-        )
-
-        # Simplified residual blocks
-        self.residual_layers = nn.ModuleList([
-            ResidualBlock(hidden_dim, hidden_dim, dropout=0.1)
-            for _ in range(n_layers - 1)
-        ])
-
-        # Simplified attention
-        self.attention = SimpleAttention(hidden_dim)
-
-        # Edge prediction layers
-        self.edge_mlp = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(hidden_dim),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, 2)
-        )
-
-        # Initialize parameters with smaller values
-        self.apply(self._init_weights)
-
-        # Learnable but bounded temperature
-        self.temperature = nn.Parameter(torch.ones(1) * 0.5)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=0.02)
-            if module.bias is not None:
-                nn.init.constant_(module.bias, 0)
+        self.mlp = nn.ModuleList(mlp_layers)
+        self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, stats):
-        batch_size = x.size(0)
-
-        # Concatenate and process input
+        # Concatenate the stats vector to the latent representation
         x = torch.cat((x, stats), dim=-1)
-        x = x.unsqueeze(1).expand(-1, self.n_nodes, -1)
 
-        # Initial projection and dimension reduction
-        h = self.input_proj(x)
-        h = self.dim_reduce(h)
+        # Pass through the MLP layers
+        for i in range(self.n_layers - 1):
+            x = self.relu(self.mlp[i](x))
 
-        # Process through residual layers with gradient scaling
-        for layer in self.residual_layers:
-            h = h + 0.1 * layer(h)  # Scale residual connections
+        x = self.mlp[self.n_layers - 1](x)
+        x = torch.reshape(x, (x.size(0), -1, 2))
+        x = F.gumbel_softmax(x, tau=1, hard=True)[:, :, 0]
 
-        # Apply simplified attention
-        h = self.attention(h)
-
-        # Generate edge predictions
-        edge_logits = []
-        for i in range(self.n_nodes):
-            for j in range(i + 1, self.n_nodes):
-                edge_input = torch.cat([h[:, i], h[:, j]], dim=-1)
-                edge_logit = self.edge_mlp(edge_input)
-                edge_logits.append(edge_logit)
-
-        edge_logits = torch.stack(edge_logits, dim=1)
-
-        # Bounded temperature for Gumbel-Softmax
-        temp = torch.clamp(self.temperature, min=0.1, max=2.0)
-        x = F.gumbel_softmax(edge_logits, tau=temp, hard=True)[:, :, 0]
-
-        # Convert to adjacency matrix
-        adj = torch.zeros(batch_size, self.n_nodes, self.n_nodes, device=x.device)
+        adj = torch.zeros(x.size(0), self.n_nodes, self.n_nodes, device=x.device)
         idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
         adj[:, idx[0], idx[1]] = x
         adj = adj + torch.transpose(adj, 1, 2)
-
         return adj
 
 
+class ResidualBlock(nn.Module):
+    """
+    A simple residual block:
+     - Linear (in->hidden)
+     - Non-linearity (ReLU)
+     - Dropout
+     - Linear (hidden->in)
+     - Skip Connection
+    """
+
+    def __init__(self, in_dim, hidden_dim, dropout=0.1):
+        super(ResidualBlock, self).__init__()
+        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, in_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        # x has shape: (batch_size, in_dim)
+        identity = x
+        out = self.relu(self.fc1(x))
+        out = self.dropout(out)
+        out = self.fc2(out)
+        return self.relu(out + identity)  # skip connection + activation
+
+
 class FastDecoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes):
+    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes, dropout=0.1):
         super(FastDecoder, self).__init__()
         self.n_layers = n_layers
         self.n_nodes = n_nodes
 
-        # Single MLP for initial processing
-        self.mlp = nn.Sequential(
-            nn.Linear(latent_dim + 7, hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(hidden_dim)
-        )
+        # First layer: from (latent_dim + 7) to hidden_dim
+        # so dimension changes from (latent_dim + 7) -> hidden_dim
+        self.input_fc = nn.Linear(latent_dim + 7, hidden_dim)
 
-        # Lightweight attention
-        self.attention_key = nn.Linear(hidden_dim, hidden_dim)
-        self.attention_query = nn.Linear(hidden_dim, hidden_dim)
+        # Residual blocks (each keeps dimension == hidden_dim)
+        # We'll do n_layers - 2 residual blocks to match your original structure
+        self.res_blocks = nn.ModuleList([
+            ResidualBlock(hidden_dim, hidden_dim, dropout=dropout)
+            for _ in range(n_layers - 2)
+        ])
 
-        # Final edge prediction
-        self.edge_proj = nn.Linear(hidden_dim * 2, 2)
-        self.temperature = nn.Parameter(torch.ones(1) * 0.5)
+        # Final layer: from hidden_dim -> 2 * n_nodes*(n_nodes - 1)//2
+        self.output_fc = nn.Linear(hidden_dim, 2 * n_nodes * (n_nodes - 1) // 2)
 
     def forward(self, x, stats):
-        batch_size = x.size(0)
+        # Concatenate the stats vector to the latent representation
+        x = torch.cat((x, stats), dim=-1)  # shape: (batch_size, latent_dim+7)
 
-        # Process input
-        x = torch.cat((x, stats), dim=-1)
-        h = self.mlp(x)
+        # First layer + activation
+        x = F.relu(self.input_fc(x))  # shape: (batch_size, hidden_dim)
 
-        # Create node embeddings
-        h = h.unsqueeze(1).expand(-1, self.n_nodes, -1)
+        # Pass through residual blocks
+        for block in self.res_blocks:
+            x = block(x)  # still (batch_size, hidden_dim)
 
-        # Efficient attention
-        queries = self.attention_query(h)
-        keys = self.attention_key(h)
-        attention = torch.bmm(queries, keys.transpose(1, 2)) / np.sqrt(h.size(-1))
-        attention = F.softmax(attention, dim=-1)
-        h = torch.bmm(attention, h)
+        # Final linear layer (no activation here, since we do gumbel_softmax next)
+        x = self.output_fc(x)  # shape: (batch_size, 2*num_edges)
 
-        # Efficient edge prediction
-        # Create all possible node pairs at once
-        node_i = torch.arange(self.n_nodes, device=h.device)
-        node_j = torch.arange(self.n_nodes, device=h.device)
-        node_i, node_j = torch.meshgrid(node_i, node_j, indexing='ij')
-        mask = node_i < node_j
-        node_i = node_i[mask]
-        node_j = node_j[mask]
+        # Reshape to (batch_size, num_edges, 2)
+        x = torch.reshape(x, (x.size(0), -1, 2))
 
-        # Get node features for all pairs at once
-        node_features_i = h[:, node_i]
-        node_features_j = h[:, node_j]
-        edge_features = torch.cat([node_features_i, node_features_j], dim=-1)
+        # Gumbel softmax
+        x = F.gumbel_softmax(x, tau=1.0, hard=True)[:, :, 0]  # shape: (batch_size, num_edges)
 
-        # Compute all edge logits at once
-        edge_logits = self.edge_proj(edge_features)
-
-        # Apply Gumbel-Softmax
-        temp = torch.clamp(self.temperature, min=0.1, max=2.0)
-        edge_probs = F.gumbel_softmax(edge_logits, tau=temp, hard=True)[:, :, 0]
-
-        # Create adjacency matrix efficiently
-        adj = torch.zeros(batch_size, self.n_nodes, self.n_nodes, device=x.device)
-        adj[:, node_i, node_j] = edge_probs
-        adj = adj + adj.transpose(1, 2)
+        # Build adjacency matrix
+        adj = torch.zeros(x.size(0), self.n_nodes, self.n_nodes, device=x.device)
+        idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
+        adj[:, idx[0], idx[1]] = x
+        adj = adj + torch.transpose(adj, 1, 2)
 
         return adj
 
