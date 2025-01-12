@@ -97,11 +97,14 @@ class ResidualBlock(nn.Module):
 
 
 class FastDecoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes, dropout=0.1):
+    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes, dropout=0.1, initial_tau=2.0, final_tau=0.5, tau_decay=0.995):
         super(FastDecoder, self).__init__()
         self.n_layers = n_layers
         self.n_nodes = n_nodes
 
+        self.tau = initial_tau
+        self.final_tau = final_tau
+        self.tau_decay = tau_decay
         # First layer: from (latent_dim + 7) to hidden_dim
         # so dimension changes from (latent_dim + 7) -> hidden_dim
         self.input_fc = nn.Linear(latent_dim + 7, hidden_dim)
@@ -134,7 +137,7 @@ class FastDecoder(nn.Module):
         x = torch.reshape(x, (x.size(0), -1, 2))
 
         # Gumbel softmax
-        x = F.gumbel_softmax(x, tau=1.0, hard=True)[:, :, 0]  # shape: (batch_size, num_edges)
+        x = F.gumbel_softmax(x, tau=self.tau, hard=True)[:, :, 0] # shape: (batch_size, num_edges)
 
         # Build adjacency matrix
         adj = torch.zeros(x.size(0), self.n_nodes, self.n_nodes, device=x.device)
@@ -143,6 +146,9 @@ class FastDecoder(nn.Module):
         adj = adj + torch.transpose(adj, 1, 2)
 
         return adj
+    def update_temperature(self):
+        """ Decays the Gumbel softmax temperature each epoch. """
+        self.tau = max(self.final_tau, self.tau * self.tau_decay)
 
 class GIN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
@@ -154,7 +160,7 @@ class GIN(torch.nn.Module):
             GINConv(
                 nn.Sequential(
                     nn.Linear(input_dim, hidden_dim),
-                    nn.LeakyReLU(0.2),
+                    F.silu(),
                     nn.BatchNorm1d(hidden_dim),
                     nn.Linear(hidden_dim, hidden_dim),
                     nn.LeakyReLU(0.2),
@@ -166,7 +172,7 @@ class GIN(torch.nn.Module):
                 GINConv(
                     nn.Sequential(
                         nn.Linear(hidden_dim, hidden_dim),
-                        nn.LeakyReLU(0.2),
+                        F.silu(),
                         nn.BatchNorm1d(hidden_dim),
                         nn.Linear(hidden_dim, hidden_dim),
                         nn.LeakyReLU(0.2),

@@ -50,7 +50,7 @@ parser.add_argument('--dropout', type=float, default=0.0)
 parser.add_argument('--batch-size', type=int, default=256)
 
 # Number of epochs for autoencoder training
-parser.add_argument('--epochs-autoencoder', type=int, default=200)
+parser.add_argument('--epochs-autoencoder', type=int, default=800)
 
 # Hidden dimension sizes
 parser.add_argument('--hidden-dim-encoder', type=int, default=64)
@@ -144,7 +144,7 @@ if args.train_autoencoder:
             train_loss_all += loss.item()
             train_count += torch.max(data.batch)+1
             optimizer.step()
-
+        autoencoder.decoder.update_temperature()
         autoencoder.eval()
         val_loss_all = 0
         val_count = 0
@@ -236,8 +236,8 @@ if args.train_denoiser:
             test_results = test_gaussian_properties(z_T)
 
             # If not Gaussian enough and not at max timesteps, increase timesteps
-            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.21) and current_timesteps < 100000:
-                current_timesteps = min(current_timesteps + 100, 100000)
+            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.2) and current_timesteps < 500000:
+                current_timesteps = min(current_timesteps + 1000, 500000)
                 print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
                 print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
                 # Recalculate diffusion parameters with new timesteps
