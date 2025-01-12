@@ -93,6 +93,7 @@ class GraphAttention(nn.Module):
         out = self.output_layer(attended)
         return out
 
+
 class Decoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes):
         super(Decoder, self).__init__()
@@ -113,7 +114,8 @@ class Decoder(nn.Module):
 
         # Output layer with attention mechanism
         self.attention = GraphAttention(hidden_dim, hidden_dim)
-        self.final_layer = nn.Linear(hidden_dim, 2)
+        # Modified final layer to account for concatenated edge inputs
+        self.final_layer = nn.Linear(hidden_dim * 2, 2)  # Changed input dim to hidden_dim * 2
 
         # Temperature parameter for Gumbel-Softmax (learnable)
         self.temperature = nn.Parameter(torch.ones(1))
@@ -133,17 +135,18 @@ class Decoder(nn.Module):
             h = layer(h)
 
         # Apply attention mechanism
-        h = self.attention(h)
+        h = self.attention(h)  # h shape: [batch_size, n_nodes, hidden_dim]
 
         # Generate edge probabilities
         edge_logits = []
         for i in range(self.n_nodes):
             for j in range(i + 1, self.n_nodes):
-                edge_input = torch.cat([h[:, i], h[:, j]], dim=-1)
-                edge_logit = self.final_layer(edge_input)
+                # Concatenate node pair embeddings
+                edge_input = torch.cat([h[:, i], h[:, j]], dim=-1)  # shape: [batch_size, hidden_dim * 2]
+                edge_logit = self.final_layer(edge_input)  # shape: [batch_size, 2]
                 edge_logits.append(edge_logit)
 
-        edge_logits = torch.stack(edge_logits, dim=1)
+        edge_logits = torch.stack(edge_logits, dim=1)  # shape: [batch_size, num_edges, 2]
 
         # Apply Gumbel-Softmax with learned temperature
         x = F.gumbel_softmax(edge_logits, tau=self.temperature.abs(), hard=True)[:, :, 0]
