@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from torch_geometric.nn import GINConv
 from torch_geometric.nn import global_add_pool
-from torch_geometric.nn import GATConv
+from torch_geometric.nn import GATv2Conv
 
 # Decoder
 """class Decoder(nn.Module):
@@ -197,13 +197,13 @@ class GATEncoder(nn.Module):
         # heads: number of attention heads
         # each head has dimension hidden_dim // num_heads (must divide cleanly)
         self.convs.append(
-            GATConv(in_channels=input_dim, out_channels=hidden_dim // num_heads, heads=num_heads)
+            GATv2Conv(in_channels=input_dim, out_channels=hidden_dim // num_heads, heads=num_heads)
         )
 
         # Additional GAT layers
         for _ in range(n_layers - 1):
             self.convs.append(
-                GATConv(in_channels=hidden_dim, out_channels=hidden_dim // num_heads, heads=num_heads)
+                GATv2Conv(in_channels=hidden_dim, out_channels=hidden_dim // num_heads, heads=num_heads)
             )
 
         self.bn = nn.BatchNorm1d(hidden_dim)
