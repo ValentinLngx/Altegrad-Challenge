@@ -169,6 +169,74 @@ class Decoder(nn.Module):
         return adj
 
 
+class FastDecoder(nn.Module):
+    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes):
+        super(FastDecoder, self).__init__()
+        self.n_layers = n_layers
+        self.n_nodes = n_nodes
+
+        # Single MLP for initial processing
+        self.mlp = nn.Sequential(
+            nn.Linear(latent_dim + 7, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim)
+        )
+
+        # Lightweight attention
+        self.attention_key = nn.Linear(hidden_dim, hidden_dim)
+        self.attention_query = nn.Linear(hidden_dim, hidden_dim)
+
+        # Final edge prediction
+        self.edge_proj = nn.Linear(hidden_dim * 2, 2)
+        self.temperature = nn.Parameter(torch.ones(1) * 0.5)
+
+    def forward(self, x, stats):
+        batch_size = x.size(0)
+
+        # Process input
+        x = torch.cat((x, stats), dim=-1)
+        h = self.mlp(x)
+
+        # Create node embeddings
+        h = h.unsqueeze(1).expand(-1, self.n_nodes, -1)
+
+        # Efficient attention
+        queries = self.attention_query(h)
+        keys = self.attention_key(h)
+        attention = torch.bmm(queries, keys.transpose(1, 2)) / np.sqrt(h.size(-1))
+        attention = F.softmax(attention, dim=-1)
+        h = torch.bmm(attention, h)
+
+        # Efficient edge prediction
+        # Create all possible node pairs at once
+        node_i = torch.arange(self.n_nodes, device=h.device)
+        node_j = torch.arange(self.n_nodes, device=h.device)
+        node_i, node_j = torch.meshgrid(node_i, node_j, indexing='ij')
+        mask = node_i < node_j
+        node_i = node_i[mask]
+        node_j = node_j[mask]
+
+        # Get node features for all pairs at once
+        node_features_i = h[:, node_i]
+        node_features_j = h[:, node_j]
+        edge_features = torch.cat([node_features_i, node_features_j], dim=-1)
+
+        # Compute all edge logits at once
+        edge_logits = self.edge_proj(edge_features)
+
+        # Apply Gumbel-Softmax
+        temp = torch.clamp(self.temperature, min=0.1, max=2.0)
+        edge_probs = F.gumbel_softmax(edge_logits, tau=temp, hard=True)[:, :, 0]
+
+        # Create adjacency matrix efficiently
+        adj = torch.zeros(batch_size, self.n_nodes, self.n_nodes, device=x.device)
+        adj[:, node_i, node_j] = edge_probs
+        adj = adj + adj.transpose(1, 2)
+
+        return adj
 
 class GIN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
@@ -226,7 +294,7 @@ class VariationalAutoEncoder(nn.Module):
         self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
-        self.decoder = Decoder(
+        self.decoder = FastDecoder(
             latent_dim=latent_dim,
             hidden_dim=hidden_dim_dec,
             n_layers=n_layers_dec,
