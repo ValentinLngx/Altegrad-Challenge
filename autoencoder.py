@@ -4,9 +4,10 @@ import torch.nn.functional as F
 
 from torch_geometric.nn import GINConv
 from torch_geometric.nn import global_add_pool
+from torch_geometric.nn import GATConv
 
 # Decoder
-class Decoder(nn.Module):
+"""class Decoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes):
         super(Decoder, self).__init__()
         self.n_layers = n_layers
@@ -39,9 +40,101 @@ class Decoder(nn.Module):
         adj[:, idx[0], idx[1]] = x
         adj = adj + torch.transpose(adj, 1, 2)
         return adj
+"""
 
 
-class GIN(torch.nn.Module):
+class Decoder(nn.Module):
+    """
+    Decoder that:
+      1) Maps the (latent + stats) input into node embeddings of shape (batch_size, n_nodes, node_emb_dim)
+      2) Computes adjacency logits by applying an MLP f(z_i, z_j) for each node pair
+    """
+
+    def __init__(self, latent_dim, stats_dim, node_emb_dim, edge_hidden_dim, n_layers, n_nodes):
+        super(Decoder, self).__init__()
+        self.n_nodes = n_nodes
+        self.node_emb_dim = node_emb_dim
+
+        # -------------------------
+        # 1) Node-Embedding Generator
+        # -------------------------
+        # Simple approach:
+        #   - Single or multi-layer MLP that outputs (n_nodes * node_emb_dim)
+        #   - Then reshape into (batch_size, n_nodes, node_emb_dim)
+
+        mlp_layers = []
+        input_dim = latent_dim + stats_dim
+        hidden_dim = edge_hidden_dim  # you can pick different dimension(s) here
+        # Example: 2 hidden layers
+        mlp_layers.append(nn.Linear(input_dim, hidden_dim))
+        mlp_layers.append(nn.ReLU())
+        mlp_layers.append(nn.Linear(hidden_dim, n_nodes * node_emb_dim))
+
+        self.node_embedding_mlp = nn.Sequential(*mlp_layers)
+
+        # -------------------------
+        # 2) Edge Probability MLP
+        # -------------------------
+        # f(z_i, z_j) -> adjacency logit for edge (i,j)
+        # We'll stack the node embeddings along dim=-1 and feed them into an MLP
+        edge_mlp_layers = []
+        # input size is 2*node_emb_dim because we cat(z_i, z_j)
+        current_dim = 2 * node_emb_dim
+
+        for _ in range(n_layers - 1):
+            edge_mlp_layers.append(nn.Linear(current_dim, edge_hidden_dim))
+            edge_mlp_layers.append(nn.ReLU())
+            current_dim = edge_hidden_dim
+
+        # Final layer outputs 1 logit for existence of edge
+        edge_mlp_layers.append(nn.Linear(current_dim, 1))
+
+        self.edge_mlp = nn.Sequential(*edge_mlp_layers)
+
+    def forward(self, latent_z, stats):
+        """
+        Args:
+            latent_z: (batch_size, latent_dim)
+            stats:    (batch_size, stats_dim)
+        Returns:
+            adjacency_logits: (batch_size, n_nodes, n_nodes)
+        """
+        batch_size = latent_z.size(0)
+
+        # -------------------------
+        # 1) Generate Node Embeddings
+        # -------------------------
+        input_cat = torch.cat([latent_z, stats], dim=-1)  # shape: (B, latent_dim+stats_dim)
+        node_emb = self.node_embedding_mlp(input_cat)  # shape: (B, n_nodes * node_emb_dim)
+        node_emb = node_emb.view(batch_size, self.n_nodes, self.node_emb_dim)
+        # node_emb[b, i] is the embedding for node i in batch sample b
+
+        # -------------------------
+        # 2) Compute Pairwise Edge Logits
+        # -------------------------
+        # adjacency_logits[b, i, j] = MLP([node_emb[b,i], node_emb[b,j]])
+        adjacency_logits = torch.zeros(
+            batch_size, self.n_nodes, self.n_nodes,
+            device=node_emb.device
+        )
+
+        # A simple double-loop for clarity (fine for smaller n_nodes).
+        # If n_nodes is large, you might vectorize or use a more advanced approach.
+        for i in range(self.n_nodes):
+            for j in range(i + 1, self.n_nodes):
+                # cat node embeddings along dim=-1 => shape (B, 2*node_emb_dim)
+                zij = torch.cat([node_emb[:, i, :], node_emb[:, j, :]], dim=-1)
+                # pass through edge_mlp => shape (B, 1)
+                logits_ij = self.edge_mlp(zij).squeeze(-1)  # shape (B,)
+
+                # fill upper and lower triangle
+                adjacency_logits[:, i, j] = logits_ij
+                adjacency_logits[:, j, i] = logits_ij
+
+        return adjacency_logits
+
+
+"""class GIN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
         super().__init__()
         self.dropout = dropout
@@ -86,18 +179,66 @@ class GIN(torch.nn.Module):
         out = self.bn(out)
         out = self.fc(out)
         return out
+"""
+
+class GATEncoder(nn.Module):
+    """
+    Example GAT-based encoder with multiple attention heads,
+    batch normalization, and a final linear layer to produce
+    the 'latent' features.
+    """
+
+    def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, num_heads=4, dropout=0.2):
+        super().__init__()
+        self.dropout = dropout
+        self.convs = nn.ModuleList()
+
+        # First GAT layer: from input_dim -> hidden_dim
+        # heads: number of attention heads
+        # each head has dimension hidden_dim // num_heads (must divide cleanly)
+        self.convs.append(
+            GATConv(in_channels=input_dim, out_channels=hidden_dim // num_heads, heads=num_heads)
+        )
+
+        # Additional GAT layers
+        for _ in range(n_layers - 1):
+            self.convs.append(
+                GATConv(in_channels=hidden_dim, out_channels=hidden_dim // num_heads, heads=num_heads)
+            )
+
+        self.bn = nn.BatchNorm1d(hidden_dim)
+        self.fc = nn.Linear(hidden_dim, latent_dim)
+
+    def forward(self, data):
+        x, edge_index = data.x, data.edge_index
+
+        for conv in self.convs:
+            x = conv(x, edge_index)
+            x = F.elu(x)  # Activation
+            x = F.dropout(x, self.dropout, self.training)
+
+        # Global pooling (summing node features per graph)
+        x = global_add_pool(x, data.batch)
+
+        # Batch normalization on pooled features
+        x = self.bn(x)
+
+        # Linear projection to latent_dim
+        x = self.fc(x)
+        return x
 
 
 # Variational Autoencoder
 class VariationalAutoEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim_enc, hidden_dim_dec, latent_dim, n_layers_enc, n_layers_dec, n_max_nodes):
+    def __init__(self, input_dim, hidden_dim_enc, latent_dim, stats_dim, node_emb_dim, edge_hidden_dim, n_layers_enc,
+                 n_layers_dec, n_max_nodes):
         super(VariationalAutoEncoder, self).__init__()
         self.n_max_nodes = n_max_nodes
         self.input_dim = input_dim
-        self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
+        self.encoder = GATEncoder(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
-        self.decoder = Decoder(latent_dim, hidden_dim_dec, n_layers_dec, n_max_nodes)
+        self.decoder = Decoder(latent_dim, stats_dim, node_emb_dim, edge_hidden_dim, n_layers_dec, n_max_nodes)
 
     def forward(self, data, stats):
         x_g = self.encoder(data)
@@ -135,11 +276,17 @@ class VariationalAutoEncoder(nn.Module):
         x_g = self.encoder(data)
         mu = self.fc_mu(x_g)
         logvar = self.fc_logvar(x_g)
-        x_g = self.reparameterize(mu, logvar)
-        adj = self.decoder(x_g, stats)
+        z = self.reparameterize(mu, logvar)
 
-        recon = F.l1_loss(adj, data.A, reduction="mean")
+        # Decoder now outputs adjacency logits, not adjacency directly
+        adj_logits = self.decoder(z, stats)  # shape (B, n_nodes, n_nodes)
+
+        # data.A should be the "ground-truth" adjacency matrix (0/1), same shape as adj_logits
+        # If it's not the same shape, you might need to broadcast or reshape it
+        recon_loss = F.binary_cross_entropy_with_logits(adj_logits, data.A, reduction="mean")
+
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = recon + beta * kld
+        loss = recon_loss + beta * kld
 
-        return loss, recon, kld
+        return loss, recon_loss, kld
+

@@ -54,7 +54,7 @@ parser.add_argument('--dropout', type=float, default=0.0, help="Dropout rate (fr
 parser.add_argument('--batch-size', type=int, default=256, help="Batch size for training, controlling the number of samples per gradient update (default: 256)")
 
 # Number of epochs for the autoencoder training
-parser.add_argument('--epochs-autoencoder', type=int, default=400, help="Number of training epochs for the autoencoder (default: 200)")
+parser.add_argument('--epochs-autoencoder', type=int, default=2, help="Number of training epochs for the autoencoder (default: 200)")
 
 # Hidden dimension size for the encoder network
 parser.add_argument('--hidden-dim-encoder', type=int, default=64, help="Hidden dimension size for encoder layers (default: 64)")
@@ -78,7 +78,7 @@ parser.add_argument('--n-layers-decoder', type=int, default=3, help="Number of l
 parser.add_argument('--spectral-emb-dim', type=int, default=10, help="Dimensionality of spectral embeddings for representing graph structures (default: 10)")
 
 # Number of training epochs for the denoising model
-parser.add_argument('--epochs-denoise', type=int, default=200, help="Number of training epochs for the denoising model (default: 100)")
+parser.add_argument('--epochs-denoise', type=int, default=6, help="Number of training epochs for the denoising model (default: 100)")
 
 # Number of timesteps in the diffusion
 parser.add_argument('--timesteps', type=int, default=500, help="Number of timesteps for the diffusion (default: 500)")
@@ -207,9 +207,17 @@ def gradient_penalty(discriminator, real_samples, fake_samples, device, gp_coef=
 # Initialize models
 discriminator = Discriminator(latent_dim=args.latent_dim).to(device)
 # initialize VGAE model
-autoencoder = VariationalAutoEncoder(args.spectral_emb_dim + 1, args.hidden_dim_encoder, args.hidden_dim_decoder,
-                                     args.latent_dim, args.n_layers_encoder, args.n_layers_decoder,
-                                     args.n_max_nodes).to(device)
+autoencoder = VariationalAutoEncoder(
+    input_dim=args.spectral_emb_dim + 1,
+    hidden_dim_enc=args.hidden_dim_encoder,
+    latent_dim=args.latent_dim,
+    stats_dim=args.n_condition,
+    node_emb_dim=args.hidden_dim_encoder,  # Node embedding size in the decoder
+    edge_hidden_dim=args.hidden_dim_decoder,  # Hidden dimension for edge MLP
+    n_layers_enc=args.n_layers_encoder,
+    n_layers_dec=args.n_layers_decoder,
+    n_max_nodes=args.n_max_nodes
+).to(device)
 
 optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
 optimizer_disc = torch.optim.Adam(discriminator.parameters(), lr=args.lr_disc)
@@ -406,8 +414,8 @@ if args.train_denoiser:
             test_results = test_gaussian_properties(z_T)
 
             # If not Gaussian enough and not at max timesteps, increase timesteps
-            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.15) and current_timesteps < 50000:
-                current_timesteps = min(current_timesteps + 100, 50000)
+            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.2) and current_timesteps < 100000:
+                current_timesteps = min(current_timesteps + 100, 100000)
                 print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
                 print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
                 # Recalculate diffusion parameters with new timesteps
