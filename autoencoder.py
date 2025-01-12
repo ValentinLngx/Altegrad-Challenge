@@ -188,7 +188,7 @@ class GATEncoder(nn.Module):
     the 'latent' features.
     """
 
-    def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, num_heads=4, dropout=0.2):
+    def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, num_heads=1, dropout=0.2):
         super().__init__()
         self.dropout = dropout
         self.convs = nn.ModuleList()
