@@ -80,19 +80,16 @@ class ResidualBlock(nn.Module):
     def __init__(self, in_dim, hidden_dim, dropout=0.05):
         super(ResidualBlock, self).__init__()
         self.fc1 = nn.Linear(in_dim, hidden_dim)
-        self.ln1 = nn.LayerNorm(hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, in_dim)
-        self.ln2 = nn.LayerNorm(in_dim)
         self.dropout = nn.Dropout(dropout)
         self.activation = nn.SiLU()
 
     def forward(self, x):
         # x has shape: (batch_size, in_dim)
         identity = x
-        out = self.activation(self.ln1(self.fc1(x)))
+        out = self.activation(self.fc1(x))
         out = self.dropout(out)
         out = self.fc2(out)
-        out = self.ln2(out)
         return self.activation(out + identity)  # skip connection + activation
 
 
@@ -146,6 +143,7 @@ class FastDecoder(nn.Module):
         adj = adj + torch.transpose(adj, 1, 2)
 
         return adj
+
     def update_temperature(self):
         """ Decays the Gumbel softmax temperature each epoch. """
         self.tau = max(self.final_tau, self.tau * self.tau_decay)
@@ -160,7 +158,7 @@ class GIN(torch.nn.Module):
             GINConv(
                 nn.Sequential(
                     nn.Linear(input_dim, hidden_dim),
-                    nn.SiLU(),
+                    nn.LeakyReLU(0.2),
                     nn.BatchNorm1d(hidden_dim),
                     nn.Linear(hidden_dim, hidden_dim),
                     nn.LeakyReLU(0.2),
@@ -172,10 +170,10 @@ class GIN(torch.nn.Module):
                 GINConv(
                     nn.Sequential(
                         nn.Linear(hidden_dim, hidden_dim),
-                        nn.SiLU(),
+                        nn.LeakyReLU(0.2),
                         nn.BatchNorm1d(hidden_dim),
                         nn.Linear(hidden_dim, hidden_dim),
-                        nn.SiLU(),
+                        nn.LeakyReLU(0.2),
                     )
                 )
             )
@@ -245,7 +243,7 @@ class VariationalAutoEncoder(nn.Module):
         adj = self.decoder(mu, stats)
         return adj
 
-    def loss_function(self, data, stats, beta=0.05, alpha=1):
+    def loss_function(self, data, stats, beta=0.05):
         x_g = self.encoder(data)
         mu = self.fc_mu(x_g)
         logvar = self.fc_logvar(x_g)
@@ -253,8 +251,7 @@ class VariationalAutoEncoder(nn.Module):
         adj = self.decoder(x_g, stats)
 
         recon = F.l1_loss(adj, data.A, reduction="mean")
-        mae = F.l1_loss(adj, data.A, reduction="mean")
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = recon + beta * kld + alpha*mae
+        loss = recon + beta * kld
 
-        return loss, recon, kld, mae
+        return loss, recon, kld

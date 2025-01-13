@@ -169,7 +169,6 @@ if args.train_autoencoder:
         train_count = 0
         train_loss_all_recon = 0
         train_loss_all_kld = 0
-        train_loss_all_mae = 0
         cnt_train=0
 
         for data in train_loader:
@@ -179,7 +178,6 @@ if args.train_autoencoder:
             loss, recon, kld, mae  = autoencoder.loss_function(data, data.stats)
             train_loss_all_recon += recon.item()
             train_loss_all_kld += kld.item()
-            train_loss_all_mae += mae.item()
             cnt_train+=1
             loss.backward()
             train_loss_all += loss.item()
@@ -192,21 +190,19 @@ if args.train_autoencoder:
         cnt_val = 0
         val_loss_all_recon = 0
         val_loss_all_kld = 0
-        val_loss_all_mae = 0
 
         for data in val_loader:
             data = data.to(device)
-            loss, recon, kld, mae  = autoencoder.loss_function(data, data.stats)
+            loss, recon, kld  = autoencoder.loss_function(data, data.stats)
             val_loss_all_recon += recon.item()
             val_loss_all_kld += kld.item()
-            val_loss_all_mae += mae.item()
             val_loss_all += loss.item()
             cnt_val+=1
             val_count += torch.max(data.batch)+1
 
         if epoch % 1 == 0:
             dt_t = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            print('{} Epoch: {:04d}, Train Loss: {:.5f}, Train Reconstruction Loss: {:.2f}, Train KLD Loss: {:.2f}, Train MAE Loss: {:.2f},Val Loss: {:.5f}, Val Reconstruction Loss: {:.2f}, Val KLD Loss: {:.2f}, Val MAE Loss: {:.2f}'.format(dt_t,epoch, train_loss_all/cnt_train, train_loss_all_recon/cnt_train, train_loss_all_kld/cnt_train, train_loss_all_mae/cnt_train,val_loss_all/cnt_val, val_loss_all_recon/cnt_val, val_loss_all_kld/cnt_val, val_loss_all_mae/cnt_val))
+            print('{} Epoch: {:04d}, Train Loss: {:.5f}, Train Reconstruction Loss: {:.2f}, Train KLD Loss: {:.2f},Val Loss: {:.5f}, Val Reconstruction Loss: {:.2f}, Val KLD Loss: {:.2f}'.format(dt_t,epoch, train_loss_all/cnt_train, train_loss_all_recon/cnt_train, train_loss_all_kld/cnt_train, val_loss_all/cnt_val, val_loss_all_recon/cnt_val, val_loss_all_kld/cnt_val))
             
         scheduler.step()
 
