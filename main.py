@@ -20,6 +20,7 @@ from torch_geometric.data import Data
 from sklearn.preprocessing import StandardScaler
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from autoencoder import VariationalAutoEncoder
 from denoise_model import DenoiseNN, p_losses, sample, ImprovedDenoiseNN, test_gaussian_properties, q_sample
@@ -119,8 +120,8 @@ test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 autoencoder = VariationalAutoEncoder(args.spectral_emb_dim+1, args.hidden_dim_encoder, args.hidden_dim_decoder, args.latent_dim, args.n_layers_encoder, args.n_layers_decoder, args.n_max_nodes).to(device)
 
 optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
-
+#scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
+scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs_autoencoder, eta_min=1e-6)
 
 # Train VGAE model
 if args.train_autoencoder:
@@ -141,6 +142,9 @@ if args.train_autoencoder:
             train_loss_all_kld += kld.item()
             cnt_train+=1
             loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), max_norm=1.0)
+
             train_loss_all += loss.item()
             train_count += torch.max(data.batch)+1
             optimizer.step()
