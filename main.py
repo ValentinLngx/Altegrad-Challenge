@@ -119,7 +119,8 @@ test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 autoencoder = VariationalAutoEncoder(args.spectral_emb_dim+1, args.hidden_dim_encoder, args.hidden_dim_decoder, args.latent_dim, args.n_layers_encoder, args.n_layers_decoder, args.n_max_nodes).to(device)
 
 optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
+#scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
+scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs_autoencoder, eta_min=1e-6)
 
 
 # Train VGAE model
