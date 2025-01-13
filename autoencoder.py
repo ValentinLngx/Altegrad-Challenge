@@ -210,6 +210,22 @@ class VariationalAutoEncoder(nn.Module):
             n_layers=n_layers_dec,
             n_nodes=n_max_nodes
         )
+        # Add cyclic KL annealing parameters
+        self.kl_cycle_length = 20  # Length of each cycle
+        self.current_epoch = 0
+
+    def get_kl_weight(self):
+        # Implements cyclic KL annealing
+        if self.training:
+            cycle_position = (self.current_epoch % self.kl_cycle_length) / self.kl_cycle_length
+            if cycle_position < 0.5:
+                # Increasing phase
+                kl_weight = cycle_position * 2
+            else:
+                # Constant phase
+                kl_weight = 1.0
+            return kl_weight
+        return 1.0  # During evaluation, use full KL term
 
     def forward(self, data, stats):
         x_g = self.encoder(data)
@@ -250,8 +266,34 @@ class VariationalAutoEncoder(nn.Module):
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
 
-        recon = F.l1_loss(adj, data.A, reduction="mean")
+        # Reconstruction loss with edge importance weighting
+        edge_weights = torch.ones_like(data.A)
+        edge_weights = edge_weights + (data.A * 2.0)  # Weight existing edges more heavily
+        recon = F.binary_cross_entropy_with_logits(adj, data.A, weight=edge_weights, reduction="mean")
+        #recon = F.l1_loss(adj, data.A, reduction="mean")
+
+        # KL divergence with annealing
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = recon + beta * kld
+        kl_weight = self.get_kl_weight()
+
+        # Structural loss using graph properties
+        structural_loss = self.structural_loss(adj, data.A)
+
+        # Combined loss with weighted terms
+        loss = recon + kl_weight * kld + 0.1 * structural_loss
+        #loss = recon + beta * kld
 
         return loss, recon, kld
+
+    def structural_loss(self, pred_adj, true_adj):
+        # Add structural properties matching
+        pred_degree = torch.sum(pred_adj, dim=2)
+        true_degree = torch.sum(true_adj, dim=2)
+        degree_loss = F.mse_loss(pred_degree, true_degree)
+
+        # Add clustering coefficient approximation
+        pred_triangles = torch.bmm(torch.bmm(pred_adj, pred_adj), pred_adj)
+        true_triangles = torch.bmm(torch.bmm(true_adj, true_adj), true_adj)
+        clustering_loss = F.mse_loss(pred_triangles, true_triangles)
+
+        return degree_loss + clustering_loss
