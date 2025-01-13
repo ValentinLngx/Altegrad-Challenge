@@ -269,7 +269,7 @@ with open("output.csv", "w", newline="") as csvfile:
 
         samples = sample(denoise_model, data.stats, latent_dim=args.latent_dim, timesteps=args.timesteps, betas=betas, batch_size=bs)
         x_sample = samples[-1]
-        adj = autoencoder.decode_mu(x_sample)
+        adj = autoencoder.decode_mu(x_sample, stat)
         stat_d = torch.reshape(stat, (-1, args.n_condition))
 
 
