@@ -282,7 +282,6 @@ def get_score():
     print("MAE Score:", mae_score)
     print("Furthest prediction count:", counts)
 
-get_score()
 
 
 def cost(G, target_stats, stat_train):

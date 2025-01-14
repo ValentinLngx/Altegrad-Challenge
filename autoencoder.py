@@ -14,9 +14,9 @@ class Decoder(nn.Module):
 
         # Adjusting the input size of the first layer to account for the concatenated stats vector
         mlp_layers = [nn.Linear(latent_dim + 7, hidden_dim)] + [
-            nn.Linear(hidden_dim, hidden_dim) for _ in range(n_layers - 2)
+            nn.Linear(hidden_dim*(2**i), hidden_dim*(2**(i+1))) for i in range(n_layers - 2)
         ]
-        mlp_layers.append(nn.Linear(hidden_dim, 2 * n_nodes * (n_nodes - 1) // 2))
+        mlp_layers.append(nn.Linear(hidden_dim*2**(n_layers-2), n_nodes * (n_nodes - 1)))
 
         self.mlp = nn.ModuleList(mlp_layers)
         self.relu = nn.ReLU()

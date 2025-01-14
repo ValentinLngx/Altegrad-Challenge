@@ -60,10 +60,10 @@ parser.add_argument('--epochs-autoencoder', type=int, default=200, help="Number 
 parser.add_argument('--hidden-dim-encoder', type=int, default=64, help="Hidden dimension size for encoder layers (default: 64)")
 
 # Hidden dimension size for the decoder network
-parser.add_argument('--hidden-dim-decoder', type=int, default=256, help="Hidden dimension size for decoder layers (default: 256)")
+parser.add_argument('--hidden-dim-decoder', type=int, default=128, help="Hidden dimension size for decoder layers (default: 256)")
 
 # Dimensionality of the latent space
-parser.add_argument('--latent-dim', type=int, default=32, help="Dimensionality of the latent space in the autoencoder (default: 32)")
+parser.add_argument('--latent-dim', type=int, default=64, help="Dimensionality of the latent space in the autoencoder (default: 32)")
 
 # Maximum number of nodes of graphs
 parser.add_argument('--n-max-nodes', type=int, default=50, help="Possible maximum number of nodes in graphs (default: 50)")
@@ -72,7 +72,7 @@ parser.add_argument('--n-max-nodes', type=int, default=50, help="Possible maximu
 parser.add_argument('--n-layers-encoder', type=int, default=2, help="Number of layers in the encoder network (default: 2)")
 
 # Number of layers in the decoder network
-parser.add_argument('--n-layers-decoder', type=int, default=3, help="Number of layers in the decoder network (default: 3)")
+parser.add_argument('--n-layers-decoder', type=int, default=6, help="Number of layers in the decoder network (default: 3)")
 
 # Dimensionality of spectral embeddings for graph structure representation
 parser.add_argument('--spectral-emb-dim', type=int, default=10, help="Dimensionality of spectral embeddings for representing graph structures (default: 10)")
