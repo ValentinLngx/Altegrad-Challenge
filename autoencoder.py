@@ -153,12 +153,75 @@ class FastDecoder(nn.Module):
         """ Decays the Gumbel softmax temperature each epoch. """
         self.tau = max(self.final_tau, self.tau * self.tau_decay)
 
-class GIN(torch.nn.Module):
+
+class AdjacencyCNNEncoder(nn.Module):
+    """
+    A convolutional encoder that takes as input a batch of adjacency matrices of 
+    shape (B, 50, 50) and produces a latent vector of shape (B, latent_dim) for each graph.
+    
+    The architecture treats the 50x50 binary adjacency as a one-channel "image" and applies
+    several convolutional layers, followed by a fully connected layer that maps to the latent space.
+    
+    This latent vector is directly comparable to the latent vector produced by the GIN encoder.
+    """
+    def __init__(self, n_nodes=50, hidden_dim=256, latent_dim=256):
+        """
+        Args:
+            n_nodes: Number of nodes in the graph (50).
+            hidden_dim: Internal dimension of the CNN (number of filters in the last conv layer).
+            latent_dim: Dimension of the latent vector output.
+        """
+        super(AdjacencyCNNEncoder, self).__init__()
+        # Input: (B, 1, 50, 50)
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)    # -> (B, 32, 50, 50)
+        self.bn1   = nn.BatchNorm2d(32)
+        
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)  # -> (B, 64, 25, 25)
+        self.bn2   = nn.BatchNorm2d(64)
+        
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1) # -> (B, 128, 13, 13)
+        self.bn3   = nn.BatchNorm2d(128)
+        
+        self.conv4 = nn.Conv2d(128, hidden_dim, kernel_size=3, stride=2, padding=1) 
+        # With hidden_dim (e.g., 256) filters, output: (B, hidden_dim, 7, 7)
+        self.bn4   = nn.BatchNorm2d(hidden_dim)
+        
+        # Fully connected layer to map the flattened conv output to the latent vector.
+        # The conv4 output is of shape (B, hidden_dim, 7, 7), i.e., a total of hidden_dim*7*7 features.
+        self.fc    = nn.Linear(hidden_dim * 7 * 7, latent_dim)
+        
+    def forward(self, A):
+        """
+        Args:
+            A: adjacency matrix of shape (B, 50, 50)
+        Returns:
+            latent: a tensor of shape (B, latent_dim)
+        """
+        # Expand channel dimension: (B, 1, 50, 50)
+        x = A.unsqueeze(1)
+        x = F.relu(self.bn1(self.conv1(x)))    # (B, 32, 50, 50)
+        x = F.relu(self.bn2(self.conv2(x)))    # (B, 64, 25, 25)
+        x = F.relu(self.bn3(self.conv3(x)))    # (B, 128, 13, 13)
+        x = F.relu(self.bn4(self.conv4(x)))    # (B, hidden_dim, 7, 7)
+        
+        # Flatten
+        x = x.view(x.size(0), -1)              # (B, hidden_dim*7*7)
+        # Fully connected layer maps to latent vector of size latent_dim.
+        latent = self.fc(x)                    # (B, latent_dim)
+        return latent
+    
+    
+class GIN(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
+        """
+        Now input_dim should be 50 (the number of nodes) since each node’s feature is the corresponding
+        row of the adjacency matrix.
+        """
         super().__init__()
         self.dropout = dropout
 
-        self.convs = torch.nn.ModuleList()
+        # Create a list of GIN convolution layers.
+        self.convs = nn.ModuleList()
         self.convs.append(
             GINConv(
                 nn.Sequential(
@@ -187,14 +250,43 @@ class GIN(torch.nn.Module):
         self.fc = nn.Linear(hidden_dim, latent_dim)
 
     def forward(self, data):
-        edge_index = data.edge_index
-        x = data.x
-
+        """
+        Instead of reading data.x and data.edge_index, we now assume that data.A is a dense
+        adjacency matrix of shape (B, 50, 50) where B is the batch size.
+        
+        We will:
+          1. Create node features by using each row of the adjacency as the feature for that node.
+          2. Compute edge_index for each graph from nonzero entries of its adjacency.
+          3. Build a batch vector so that global pooling knows how to separate graphs.
+        """
+        A = data.A  # shape: (B, 50, 50)
+        B, n, _ = A.shape  # Here, n should be 50.
+        
+        # (1) Node features: each node’s feature = its row in A.
+        # x will have shape (B*n, n). For each graph, we treat the i-th row of its 50x50 A as the feature for node i.
+        x = A.view(B * n, n)
+        
+        # (2) Compute edge_index for each graph.
+        edge_index_list = []
+        for i in range(B):
+            # For graph i, get nonzero entries (edge indices) from A[i].
+            # Since A is binary, we set a threshold > 0 to determine edges.
+            nonzero = (A[i] > 0).nonzero(as_tuple=False).T  # shape: (2, num_edges_in_graph)
+            # Shift node indices for graph i by i * n (since nodes are stacked).
+            nonzero = nonzero + i * n
+            edge_index_list.append(nonzero)
+        edge_index = torch.cat(edge_index_list, dim=1)  # shape: (2, total_edges)
+        
+        # (3) Create batch vector: nodes 0..n-1 belong to graph 0, nodes n..2n-1 to graph 1, etc.
+        batch = torch.arange(B, device=A.device).unsqueeze(1).repeat(1, n).view(-1)
+        
+        # Pass through the GIN layers.
         for conv in self.convs:
             x = conv(x, edge_index)
             x = F.dropout(x, self.dropout, training=self.training)
-
-        out = global_add_pool(x, data.batch)
+        
+        # Global pooling: sum of node embeddings per graph.
+        out = global_add_pool(x, batch)  # (B, hidden_dim)
         out = self.bn(out)
         out = self.fc(out)
         return out

@@ -47,7 +47,7 @@ parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--dropout', type=float, default=0.0)
 
 # Batch size for training
-parser.add_argument('--batch-size', type=int, default=256)
+parser.add_argument('--batch-size', type=int, default=250)
 
 # Number of epochs for autoencoder training
 parser.add_argument('--epochs-autoencoder', type=int, default=100)
@@ -67,7 +67,7 @@ parser.add_argument('--n-layers-encoder', type=int, default=2)
 parser.add_argument('--n-layers-decoder', type=int, default=3)
 
 # Spectral embedding dimension
-parser.add_argument('--spectral-emb-dim', type=int, default=10)
+parser.add_argument('--spectral-emb-dim', type=int, default=20)
 
 # Number of training epochs for the denoising model
 parser.add_argument('--epochs-denoise', type=int, default=30)
@@ -116,7 +116,7 @@ test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 
 
 # initialize VGAE model
-autoencoder = VariationalAutoEncoder(args.spectral_emb_dim+1, args.hidden_dim_encoder, args.hidden_dim_decoder, args.latent_dim, args.n_layers_encoder, args.n_layers_decoder, args.n_max_nodes).to(device)
+autoencoder = VariationalAutoEncoder(50, args.hidden_dim_encoder, args.hidden_dim_decoder, args.latent_dim, args.n_layers_encoder, args.n_layers_decoder, args.n_max_nodes).to(device)
 
 optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
 #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
