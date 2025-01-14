@@ -7,28 +7,29 @@ from torch_geometric.nn import global_add_pool
 
 # Decoder
 class Decoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes):
+    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes, dim_cond):
         super(Decoder, self).__init__()
         self.n_layers = n_layers
         self.n_nodes = n_nodes
 
         # Adjusting the input size of the first layer to account for the concatenated stats vector
-        mlp_layers = [nn.Linear(latent_dim + 7, hidden_dim)] + [
-            nn.Linear(hidden_dim*(2**i)+7, hidden_dim*(2**(i+1))) for i in range(n_layers - 2)
+        mlp_layers = [nn.Linear(latent_dim + dim_cond, hidden_dim)] + [
+            nn.Linear(hidden_dim*(2**i), hidden_dim*(2**(i+1))) for i in range(n_layers - 2)
         ]
-        mlp_layers.append(nn.Linear(hidden_dim*2**(n_layers-2)+7, n_nodes * (n_nodes - 1)))
+        mlp_layers.append(nn.Linear(hidden_dim*2**(n_layers-2), n_nodes * (n_nodes - 1)))
 
+        self.cond = nn.Linear(7, dim_cond)
         self.mlp = nn.ModuleList(mlp_layers)
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, stats):
+        cond_stat = self.cond(stats)
+        x = torch.cat((x, cond_stat), dim=-1) 
         # Pass through the MLP layers
         for i in range(self.n_layers - 1):
-            x = torch.cat((x, stats), dim=-1) 
             x = self.relu(self.mlp[i](x))
-            
-        x = torch.cat((x, stats), dim=-1)   
+               
         x = self.mlp[self.n_layers - 1](x)
         x = torch.reshape(x, (x.size(0), -1, 2))
         x = F.gumbel_softmax(x, tau=1, hard=True)[:, :, 0]
@@ -96,14 +97,14 @@ class GIN(torch.nn.Module):
 
 # Variational Autoencoder
 class VariationalAutoEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim_enc, hidden_dim_dec, latent_dim, n_layers_enc, n_layers_dec, n_max_nodes):
+    def __init__(self, input_dim, hidden_dim_enc, hidden_dim_dec, latent_dim, n_layers_enc, n_layers_dec, n_max_nodes, dim_cond):
         super(VariationalAutoEncoder, self).__init__()
         self.n_max_nodes = n_max_nodes
         self.input_dim = input_dim
         self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
-        self.decoder = Decoder(latent_dim, hidden_dim_dec, n_layers_dec, n_max_nodes)
+        self.decoder = Decoder(latent_dim, hidden_dim_dec, n_layers_dec, n_max_nodes, dim_cond)
 
     def forward(self, data, stats):
         x_g = self.encoder(data)
