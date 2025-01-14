@@ -191,16 +191,13 @@ def masked_layer_norm2D(x: torch.Tensor, mask: torch.Tensor, eps: float = 1e-5):
     return layer_norm
 
 
-def cosine_beta_schedule(timesteps, s=0.008):
-    """
-    cosine schedule as proposed in https://arxiv.org/abs/2102.09672
-    """
+"""def cosine_beta_schedule(timesteps, s=0.008):
     steps = timesteps + 1
     x = torch.linspace(0, timesteps, steps)
     alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(betas, 0.0001, 0.9999)
+    return torch.clip(betas, 0.0001, 0.9999)"""
 
 
 def linear_beta_schedule(timesteps):
@@ -222,42 +219,48 @@ def sigmoid_beta_schedule(timesteps):
     return torch.sigmoid(betas) * (beta_end - beta_start) + beta_start
 
 
-
-def modified_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02, schedule_type="quadratic"):
+def cosine_beta_schedule(timesteps, s=0.008):
     """
-    Modified beta schedule with different options for better Gaussian properties
-    """
-    if schedule_type == "quadratic":
-        # Quadratic beta schedule for smoother progression
-        betas = torch.linspace(beta_start ** 0.5, beta_end ** 0.5, timesteps) ** 2
-    elif schedule_type == "cosine":
-        # Cosine schedule for better end-distribution properties
-        steps = timesteps + 1
-        x = torch.linspace(0, timesteps, steps)
-        alphas_cumprod = torch.cos(((x / timesteps) + 0.008) / (1 + 0.008) * torch.pi * 0.5) ** 2
-        alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-        betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-        return torch.clip(betas, 0.0001, 0.9999)
-    else:
-        # Enhanced linear schedule with smoothing
-        betas = torch.linspace(beta_start, beta_end, timesteps)
+    Cosine schedule as proposed in https://arxiv.org/abs/2102.09672
 
-    return betas
+    Args:
+        timesteps (int): Number of timesteps in the diffusion process
+        s (float): Offset parameter to prevent singularity at t=0
+
+    Returns:
+        torch.Tensor: Beta schedule for the diffusion process
+    """
+    steps = timesteps + 1
+    x = torch.linspace(0, timesteps, steps)
+    alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    return torch.clip(betas, 0.0001, 0.9999)
 
 
 def get_diffusion_parameters(timesteps, beta_schedule="cosine"):
     """
     Calculate diffusion parameters with enhanced numerical stability
+
+    Args:
+        timesteps (int): Number of timesteps in the diffusion process
+        beta_schedule (str): Type of beta schedule to use ("cosine" or "quadratic")
+
+    Returns:
+        dict: Dictionary containing all diffusion parameters
     """
-    # Get betas using modified schedule
-    betas = modified_beta_schedule(timesteps, schedule_type=beta_schedule)
+    # Get betas using cosine schedule
+    if beta_schedule == "cosine":
+        betas = cosine_beta_schedule(timesteps)
+    else:
+        raise ValueError(f"Unsupported beta schedule: {beta_schedule}")
 
     # Calculate basic parameters with improved numerical stability
+    eps = 1e-8
     alphas = 1. - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
 
     # Add small epsilon to prevent numerical instability
-    eps = 1e-8
     alphas_cumprod = torch.clip(alphas_cumprod, eps, 1.0)
 
     # Calculate remaining parameters
@@ -279,5 +282,4 @@ def get_diffusion_parameters(timesteps, beta_schedule="cosine"):
         'sqrt_one_minus_alphas_cumprod': sqrt_one_minus_alphas_cumprod,
         'posterior_variance': posterior_variance
     }
-
 

@@ -76,86 +76,179 @@ class Decoder(nn.Module):
         return adj
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import List, Tuple
+
+
 class ResidualBlock(nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, dropout=0.05):
-        super(ResidualBlock, self).__init__()
+    """Improved residual block with layer normalization and better initialization."""
+
+    def __init__(
+            self,
+            in_dim: int,
+            hidden_dim: int,
+            out_dim: int,
+            dropout: float = 0.05,
+            use_layer_norm: bool = True
+    ):
+        super().__init__()
+
+        # Layer normalization for better training stability
+        self.layer_norm1 = nn.LayerNorm(in_dim) if use_layer_norm else nn.Identity()
+        self.layer_norm2 = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
+
+        # Main network layers
         self.fc1 = nn.Linear(in_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, out_dim)
-        self.projection = nn.Linear(in_dim, out_dim)  # Added projection layer for dimension matching
+        self.projection = nn.Linear(in_dim, out_dim)
+
+        # Dropout and activation
         self.dropout = nn.Dropout(dropout)
         self.activation = nn.SiLU()
 
-    def forward(self, x):
-        identity = self.projection(x)  # Project identity to match dimensions
-        out = self.activation(self.fc1(x))
+        # Initialize weights using Kaiming initialization
+        nn.init.kaiming_normal_(self.fc1.weight, nonlinearity='relu')
+        nn.init.kaiming_normal_(self.fc2.weight, nonlinearity='relu')
+        nn.init.kaiming_normal_(self.projection.weight, nonlinearity='relu')
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with pre-layer normalization architecture.
+
+        Args:
+            x: Input tensor of shape (batch_size, in_dim)
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, out_dim)
+        """
+        # Identity branch with projection
+        identity = self.projection(x)
+
+        # Main branch with layer norm, activation, and dropout
+        out = self.layer_norm1(x)
+        out = self.fc1(out)
+        out = self.activation(out)
         out = self.dropout(out)
+
+        out = self.layer_norm2(out)
         out = self.fc2(out)
-        return self.activation(out + identity)  # skip connection + activation
+
+        return self.activation(out + identity)
 
 
 class FastDecoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes, dropout=0.1, initial_tau=2.0, final_tau=0.5,
-                 tau_decay=0.995):
-        super(FastDecoder, self).__init__()
+    """
+    Improved FastDecoder with better architecture and temperature scheduling.
+
+    Args:
+        latent_dim: Dimension of the latent space
+        hidden_dim: Initial hidden dimension
+        n_layers: Number of layers in the network
+        n_nodes: Number of nodes in the output graph
+        dropout: Dropout probability
+        initial_tau: Initial temperature for Gumbel-Softmax
+        final_tau: Final temperature for Gumbel-Softmax
+        tau_decay: Temperature decay rate
+    """
+
+    def __init__(
+            self,
+            latent_dim: int,
+            hidden_dim: int,
+            n_layers: int,
+            n_nodes: int,
+            dropout: float = 0.1,
+            initial_tau: float = 2.0,
+            final_tau: float = 0.5,
+            tau_decay: float = 0.995
+    ):
+        super().__init__()
+
         self.n_layers = n_layers
         self.n_nodes = n_nodes
+        self.stats_dim = 7  # Making this explicit as a class attribute
 
-        self.tau = initial_tau
-        self.final_tau = final_tau
+        # Temperature parameters for Gumbel-Softmax
+        self.register_buffer('tau', torch.tensor(initial_tau))
+        self.register_buffer('final_tau', torch.tensor(final_tau))
         self.tau_decay = tau_decay
 
-        # First layer: from (latent_dim + 7) to hidden_dim
-        self.input_fc = nn.Linear(latent_dim + 7, hidden_dim)
+        # Input processing
+        self.input_norm = nn.LayerNorm(latent_dim + self.stats_dim)
+        self.input_fc = nn.Linear(latent_dim + self.stats_dim, hidden_dim)
 
-        # Calculate dimensions for each residual block
+        # Create progressive growing architecture
+        self.res_blocks = self._build_residual_blocks(hidden_dim, n_layers, dropout)
+
+        # Output processing
+        final_dim = hidden_dim * (2 ** (n_layers - 2))
+        self.output_dim = 2 * n_nodes * (n_nodes - 1) // 2
+        self.output_fc = nn.Linear(final_dim, self.output_dim)
+
+        # Initialize weights
+        self._initialize_weights()
+
+    def _build_residual_blocks(self, hidden_dim: int, n_layers: int, dropout: float) -> nn.ModuleList:
+        """Constructs the residual blocks with progressive growing architecture."""
         dims = [hidden_dim * (2 ** i) for i in range(n_layers - 1)]
 
-        # Residual blocks with increasing sizes
-        self.res_blocks = nn.ModuleList([
+        return nn.ModuleList([
             ResidualBlock(
                 in_dim=dims[i],
-                hidden_dim=dims[i] * 2,  # Hidden dim is twice the input
-                out_dim=dims[i + 1],  # Output dim matches next block's input
+                hidden_dim=dims[i] * 2,
+                out_dim=dims[i + 1],
                 dropout=dropout
             )
             for i in range(n_layers - 2)
         ])
 
-        # Final layer: from last hidden_dim -> 2 * n_nodes*(n_nodes - 1)//2
-        final_dim = hidden_dim * (2 ** (n_layers - 2))
-        self.output_fc = nn.Linear(final_dim, 2 * n_nodes * (n_nodes - 1) // 2)
+    def _initialize_weights(self):
+        """Initialize network weights using Kaiming initialization."""
+        nn.init.kaiming_normal_(self.input_fc.weight, nonlinearity='relu')
+        nn.init.kaiming_normal_(self.output_fc.weight, nonlinearity='relu')
 
-    def forward(self, x, stats):
-        # Concatenate the stats vector to the latent representation
-        x = torch.cat((x, stats), dim=-1)  # shape: (batch_size, latent_dim+7)
+    def forward(self, x: torch.Tensor, stats: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the decoder.
 
-        # First layer + activation
-        x = F.silu(self.input_fc(x))  # shape: (batch_size, hidden_dim)
+        Args:
+            x: Latent representation tensor of shape (batch_size, latent_dim)
+            stats: Statistics tensor of shape (batch_size, 7)
 
-        # Pass through residual blocks with increasing sizes
+        Returns:
+            torch.Tensor: Adjacency matrix of shape (batch_size, n_nodes, n_nodes)
+        """
+        # Combine input and apply normalization
+        x = torch.cat((x, stats), dim=-1)
+        x = self.input_norm(x)
+        x = F.silu(self.input_fc(x))
+
+        # Pass through residual blocks
         for block in self.res_blocks:
             x = block(x)
 
-        # Final linear layer
-        x = self.output_fc(x)  # shape: (batch_size, 2*num_edges)
-
-        # Reshape to (batch_size, num_edges, 2)
+        # Generate adjacency matrix
+        x = self.output_fc(x)
         x = torch.reshape(x, (x.size(0), -1, 2))
+        x = F.gumbel_softmax(x, tau=self.tau, hard=True)[:, :, 0]
 
-        # Gumbel softmax
-        x = F.gumbel_softmax(x, tau=self.tau, hard=True)[:, :, 0]  # shape: (batch_size, num_edges)
-
-        # Build adjacency matrix
+        # Convert to symmetric adjacency matrix
         adj = torch.zeros(x.size(0), self.n_nodes, self.n_nodes, device=x.device)
         idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
         adj[:, idx[0], idx[1]] = x
-        adj = adj + torch.transpose(adj, 1, 2)
+        adj = adj + adj.transpose(1, 2)
 
         return adj
 
+    @torch.no_grad()
     def update_temperature(self):
-        """ Decays the Gumbel softmax temperature each epoch. """
-        self.tau = max(self.final_tau, self.tau * self.tau_decay)
+        """Updates the Gumbel-Softmax temperature using exponential decay."""
+        self.tau = torch.maximum(
+            self.final_tau,
+            self.tau * self.tau_decay
+        )
 
 class GIN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
