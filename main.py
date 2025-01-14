@@ -90,7 +90,7 @@ parser.add_argument('--hidden-dim-denoise', type=int, default=512, help="Hidden 
 parser.add_argument('--n-layers_denoise', type=int, default=3, help="Number of layers in the denoising model (default: 3)")
 
 # Flag to toggle training of the autoencoder (VGAE)
-parser.add_argument('--train-autoencoder', action='store_false', default=True, help="Flag to enable/disable autoencoder (VGAE) training (default: enabled)")
+parser.add_argument('--train-autoencoder', action='store_false', default=False, help="Flag to enable/disable autoencoder (VGAE) training (default: enabled)")
 
 # Flag to toggle training of the diffusion-based denoising model
 parser.add_argument('--train-denoiser', action='store_true', default=True, help="Flag to enable/disable denoiser training (default: enabled)")
@@ -215,7 +215,7 @@ if args.train_denoiser:
         for data in train_loader:
             data = data.to(device)
             optimizer.zero_grad()
-            x_g = autoencoder.encode(data)
+            x_g, mu, logvar = autoencoder.encode(data)
             t = torch.randint(0, args.timesteps, (x_g.size(0),), device=device).long()
             loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, loss_type="huber")
             loss.backward()
@@ -228,7 +228,7 @@ if args.train_denoiser:
         val_count = 0
         for data in val_loader:
             data = data.to(device)
-            x_g = autoencoder.encode(data)
+            x_g, mu, logvar = autoencoder.encode(data)
             t = torch.randint(0, args.timesteps, (x_g.size(0),), device=device).long()
             loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, loss_type="huber")
             val_loss_all += x_g.size(0) * loss.item()
