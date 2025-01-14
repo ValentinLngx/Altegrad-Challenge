@@ -84,25 +84,25 @@ class Decoder(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_dim, hidden_dim, dropout=0.05):
+    def __init__(self, in_dim, hidden_dim, out_dim, dropout=0.05):
         super(ResidualBlock, self).__init__()
-        self.fc1 = nn.Linear(in_dim + 7, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, in_dim)
+        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, out_dim)
+        self.projection = nn.Linear(in_dim, out_dim)  # Added projection layer for dimension matching
         self.dropout = nn.Dropout(dropout)
-        self.activation = nn.ReLU()
+        self.activation = nn.SiLU()
 
-    def forward(self, x, stats):
-        # x has shape: (batch_size, in_dim)
-        identity = x
-        out = torch.cat((x, stats), dim=-1) 
-        out = self.activation(self.fc1(out))
+    def forward(self, x):
+        identity = self.projection(x)  # Project identity to match dimensions
+        out = self.activation(self.fc1(x))
         out = self.dropout(out)
         out = self.fc2(out)
         return self.activation(out + identity)  # skip connection + activation
 
 
 class FastDecoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes, dropout=0.1, initial_tau=2.0, final_tau=0.5, tau_decay=0.995):
+    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes, dropout=0.1, initial_tau=2.0, final_tau=0.5,
+                 tau_decay=0.995):
         super(FastDecoder, self).__init__()
         self.n_layers = n_layers
         self.n_nodes = n_nodes
@@ -111,41 +111,52 @@ class FastDecoder(nn.Module):
         self.final_tau = final_tau
         self.tau_decay = tau_decay
 
+        # First layer: from (latent_dim + 7) to hidden_dim
         self.input_fc = nn.Linear(latent_dim + 7, hidden_dim)
 
+        # Calculate dimensions for each residual block
+        dims = [hidden_dim * (2 ** i) for i in range(n_layers - 1)]
+
+        # Residual blocks with increasing sizes
         self.res_blocks = nn.ModuleList([
-            ResidualBlock(hidden_dim, hidden_dim, dropout=dropout)
-            for _ in range(n_layers - 2)
+            ResidualBlock(
+                in_dim=dims[i],
+                hidden_dim=dims[i] * 2,  # Hidden dim is twice the input
+                out_dim=dims[i + 1],  # Output dim matches next block's input
+                dropout=dropout
+            )
+            for i in range(n_layers - 2)
         ])
 
-        self.output_fc = nn.Linear(
-            hidden_dim, 2 * n_nodes * (n_nodes - 1) // 2
-        )
+        # Final layer: from last hidden_dim -> 2 * n_nodes*(n_nodes - 1)//2
+        final_dim = hidden_dim * (2 ** (n_layers - 2))
+        self.output_fc = nn.Linear(final_dim, 2 * n_nodes * (n_nodes - 1) // 2)
 
     def forward(self, x, stats):
+        # Concatenate the stats vector to the latent representation
+        x = torch.cat((x, stats), dim=-1)  # shape: (batch_size, latent_dim+7)
 
-        x = torch.cat((x, stats), dim=-1)             
-        x = F.relu(self.input_fc(x))                   
+        # First layer + activation
+        x = F.silu(self.input_fc(x))  # shape: (batch_size, hidden_dim)
 
+        # Pass through residual blocks with increasing sizes
         for block in self.res_blocks:
-            x = block(x, stats)                       
+            x = block(x)
 
-        x = self.output_fc(x)                       
+        # Final linear layer
+        x = self.output_fc(x)  # shape: (batch_size, 2*num_edges)
+
         # Reshape to (batch_size, num_edges, 2)
         x = torch.reshape(x, (x.size(0), -1, 2))
 
-        x = F.gumbel_softmax(x, tau=self.tau, hard=True)[:, :, 0]
-        
+        # Gumbel softmax
+        x = F.gumbel_softmax(x, tau=self.tau, hard=True)[:, :, 0]  # shape: (batch_size, num_edges)
+
+        # Build adjacency matrix
         adj = torch.zeros(x.size(0), self.n_nodes, self.n_nodes, device=x.device)
         idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
         adj[:, idx[0], idx[1]] = x
         adj = adj + torch.transpose(adj, 1, 2)
-
-        batch_size = adj.size(0)
-        for b in range(batch_size):
-            n_nodes = int(stats[b][0].item())
-            adj[b, n_nodes:, :] = 0
-            adj[b, :, n_nodes:] = 0
 
         return adj
 
