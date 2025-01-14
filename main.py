@@ -53,7 +53,7 @@ parser.add_argument('--batch-size', type=int, default=256)
 parser.add_argument('--epochs-autoencoder', type=int, default=100)
 
 # Hidden dimension sizes
-parser.add_argument('--hidden-dim-encoder', type=int, default=64)
+parser.add_argument('--hidden-dim-encoder', type=int, default=128)
 parser.add_argument('--hidden-dim-decoder', type=int, default=256)
 
 # Latent dimension
