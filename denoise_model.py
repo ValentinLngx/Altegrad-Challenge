@@ -5,11 +5,11 @@ import torch.nn.functional as F
 import numpy as np
 import scipy.stats as stats
 
-def extract(a, t, x_shape):
+"""def extract(a, t, x_shape):
     batch_size = t.shape[0]
     out = a.gather(-1, t.cpu())
     return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
-
+"""
 ###########
 def test_gaussian_properties(z_T, significance_level=0.05):
     # Convert to numpy in chunks if tensor is large
@@ -140,37 +140,115 @@ def test_gaussian_properties(z_T, significance_level=0.05):
 ###########
 
 
+def extract(arr, timesteps, broadcast_shape):
+    """
+    Extract values from a 1-D array for a batch of indices.
 
-# forward diffusion (using the nice property)
+    Args:
+        arr (torch.Tensor): 1-D tensor of values to extract from
+        timesteps (torch.Tensor): 1-D tensor of indices to extract
+        broadcast_shape (tuple): Shape to broadcast the extracted values to
+
+    Returns:
+        torch.Tensor: Extracted values broadcast to the specified shape
+    """
+    res = arr.to(timesteps.device)[timesteps].float()
+    while len(res.shape) < len(broadcast_shape):
+        res = res.unsqueeze(-1)
+    return res.expand(broadcast_shape)
+
+
 def q_sample(x_start, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=None):
-    if noise is None:
-        noise = torch.randn_like(x_start)
+    """
+    Forward diffusion sampling process.
 
-    sqrt_alphas_cumprod_t = extract(sqrt_alphas_cumprod, t, x_start.shape)
-    sqrt_one_minus_alphas_cumprod_t = extract(
-        sqrt_one_minus_alphas_cumprod, t, x_start.shape
+    Args:
+        x_start (torch.Tensor): Initial sample
+        t (torch.Tensor): Timesteps
+        sqrt_alphas_cumprod (torch.Tensor): Cumulative product of sqrt alphas
+        sqrt_one_minus_alphas_cumprod (torch.Tensor): Cumulative product of sqrt(1-alphas)
+        noise (torch.Tensor, optional): Pre-generated noise. If None, will generate random noise
+
+    Returns:
+        torch.Tensor: Noised sample at specified timestep
+    """
+    device = x_start.device
+
+    if noise is None:
+        # Generate noise on the same device as input
+        noise = torch.randn_like(x_start, device=device)
+    else:
+        # Ensure noise is on the correct device
+        noise = noise.to(device)
+
+    # Extract and broadcast values
+    sqrt_alphas_cumprod_t = extract(
+        sqrt_alphas_cumprod.to(device),
+        t,
+        x_start.shape
     )
 
+    sqrt_one_minus_alphas_cumprod_t = extract(
+        sqrt_one_minus_alphas_cumprod.to(device),
+        t,
+        x_start.shape
+    )
+
+    # Compute noisy sample
     return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
 
 
-# Loss function for denoising
-def p_losses(denoise_model, x_start, t, cond, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=None, loss_type="l1"):
+def p_losses(denoise_model, x_start, t, cond, sqrt_alphas_cumprod,
+             sqrt_one_minus_alphas_cumprod, noise=None, loss_type="l1"):
+    """
+    Calculate loss for denoising model training.
+
+    Args:
+        denoise_model (torch.nn.Module): The denoising model
+        x_start (torch.Tensor): Initial clean sample
+        t (torch.Tensor): Timesteps
+        cond (torch.Tensor): Conditional information
+        sqrt_alphas_cumprod (torch.Tensor): Cumulative product of sqrt alphas
+        sqrt_one_minus_alphas_cumprod (torch.Tensor): Cumulative product of sqrt(1-alphas)
+        noise (torch.Tensor, optional): Pre-generated noise. If None, will generate random noise
+        loss_type (str): Type of loss to use ('l1', 'l2', or 'huber')
+
+    Returns:
+        torch.Tensor: Computed loss value
+    """
+    device = x_start.device
+
+    # Generate or move noise to correct device
     if noise is None:
-        noise = torch.randn_like(x_start)
-
-    x_noisy = q_sample(x_start, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=noise)
-    x_noisy_input = x_noisy.unsqueeze(1)
-    predicted_noise = denoise_model(x_noisy_input, t, cond).squeeze(1)
-
-    if loss_type == 'l1':
-        loss = F.l1_loss(noise, predicted_noise)
-    elif loss_type == 'l2':
-        loss = F.mse_loss(noise, predicted_noise)
-    elif loss_type == "huber":
-        loss = F.smooth_l1_loss(noise, predicted_noise)
+        noise = torch.randn_like(x_start, device=device)
     else:
-        raise NotImplementedError()
+        noise = noise.to(device)
+
+    # Compute noisy sample
+    with torch.cuda.amp.autocast(enabled=True):  # Enable automatic mixed precision
+        x_noisy = q_sample(
+            x_start,
+            t,
+            sqrt_alphas_cumprod,
+            sqrt_one_minus_alphas_cumprod,
+            noise=noise
+        )
+
+        # Prepare input for model
+        x_noisy_input = x_noisy.unsqueeze(1)
+
+        # Get model prediction
+        predicted_noise = denoise_model(x_noisy_input, t, cond).squeeze(1)
+
+        # Calculate loss based on specified type
+        if loss_type == 'l1':
+            loss = F.l1_loss(noise, predicted_noise)
+        elif loss_type == 'l2':
+            loss = F.mse_loss(noise, predicted_noise)
+        elif loss_type == "huber":
+            loss = F.smooth_l1_loss(noise, predicted_noise)
+        else:
+            raise ValueError(f"Unsupported loss type: {loss_type}")
 
     return loss
 
