@@ -57,7 +57,7 @@ parser.add_argument('--hidden-dim-encoder', type=int, default=128)
 parser.add_argument('--hidden-dim-decoder', type=int, default=256)
 
 # Latent dimension
-parser.add_argument('--latent-dim', type=int, default=32)
+parser.add_argument('--latent-dim', type=int, default=64)
 
 # Max number of nodes
 parser.add_argument('--n-max-nodes', type=int, default=50)
