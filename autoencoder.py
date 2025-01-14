@@ -643,7 +643,7 @@ class VariationalAutoEncoder(nn.Module):
         super(VariationalAutoEncoder, self).__init__()
         self.n_max_nodes = n_max_nodes
         self.input_dim = input_dim
-        self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
+        self.encoder = EnhancedGIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
         self.decoder = FastDecoder(
