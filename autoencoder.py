@@ -158,18 +158,14 @@ class AdjacencyCNNEncoder(nn.Module):
     """
     A convolutional encoder that takes as input a batch of adjacency matrices of 
     shape (B, 50, 50) and produces a latent vector of shape (B, latent_dim) for each graph.
-    
-    The architecture treats the 50x50 binary adjacency as a one-channel "image" and applies
-    several convolutional layers, followed by a fully connected layer that maps to the latent space.
-    
-    This latent vector is directly comparable to the latent vector produced by the GIN encoder.
     """
-    def __init__(self, n_nodes=50, hidden_dim=256, latent_dim=256):
+    def __init__(self, n_nodes=50, hidden_dim=256, out_dim=128):
         """
         Args:
-            n_nodes: Number of nodes in the graph (50).
-            hidden_dim: Internal dimension of the CNN (number of filters in the last conv layer).
-            latent_dim: Dimension of the latent vector output.
+            n_nodes: Number of nodes per graph (here 50).
+            hidden_dim: Number of filters in the last conv layer.
+            out_dim: The desired output dimension (should match the autoencoder's expected input,
+                     e.g. hidden_dim_enc from your original GIN model).
         """
         super(AdjacencyCNNEncoder, self).__init__()
         # Input: (B, 1, 50, 50)
@@ -183,31 +179,31 @@ class AdjacencyCNNEncoder(nn.Module):
         self.bn3   = nn.BatchNorm2d(128)
         
         self.conv4 = nn.Conv2d(128, hidden_dim, kernel_size=3, stride=2, padding=1) 
-        # With hidden_dim (e.g., 256) filters, output: (B, hidden_dim, 7, 7)
+        # With hidden_dim filters, output: (B, hidden_dim, 7, 7)
         self.bn4   = nn.BatchNorm2d(hidden_dim)
         
-        # Fully connected layer to map the flattened conv output to the latent vector.
-        # The conv4 output is of shape (B, hidden_dim, 7, 7), i.e., a total of hidden_dim*7*7 features.
-        self.fc    = nn.Linear(hidden_dim * 7 * 7, latent_dim)
+        # Fully connected layer to map from flattened conv output to the desired latent vector.
+        self.fc    = nn.Linear(hidden_dim * 7 * 7, out_dim)
         
-    def forward(self, A):
+    def forward(self, data):
         """
-        Args:
-            A: adjacency matrix of shape (B, 50, 50)
-        Returns:
-            latent: a tensor of shape (B, latent_dim)
+        Expects data.A to be the adjacency matrix of shape (B, 50, 50).
         """
-        # Expand channel dimension: (B, 1, 50, 50)
+        # Ensure data.A is a tensor.
+        A = data.A
+        if not isinstance(A, torch.Tensor):
+            A = torch.as_tensor(A)
+        A = A.float()  # cast to float
+        
+        # Add channel dimension: (B, 1, 50, 50)
         x = A.unsqueeze(1)
         x = F.relu(self.bn1(self.conv1(x)))    # (B, 32, 50, 50)
         x = F.relu(self.bn2(self.conv2(x)))    # (B, 64, 25, 25)
         x = F.relu(self.bn3(self.conv3(x)))    # (B, 128, 13, 13)
         x = F.relu(self.bn4(self.conv4(x)))    # (B, hidden_dim, 7, 7)
         
-        # Flatten
-        x = x.view(x.size(0), -1)              # (B, hidden_dim*7*7)
-        # Fully connected layer maps to latent vector of size latent_dim.
-        latent = self.fc(x)                    # (B, latent_dim)
+        x = x.view(x.size(0), -1)              # (B, hidden_dim * 7 * 7)
+        latent = self.fc(x)                    # (B, out_dim)
         return latent
     
     
@@ -298,7 +294,8 @@ class VariationalAutoEncoder(nn.Module):
         super(VariationalAutoEncoder, self).__init__()
         self.n_max_nodes = n_max_nodes
         self.input_dim = input_dim
-        self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
+        #self.encoder = GIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
+        self.encoder = AdjacencyCNNEncoder(hidden_dim_enc, latent_dim)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
         self.decoder = FastDecoder(
