@@ -109,8 +109,8 @@ class FastDecoder(nn.Module):
         # Residual blocks (each keeps dimension == hidden_dim)
         # We'll do n_layers - 2 residual blocks to match your original structure
         self.res_blocks = nn.ModuleList([
-            ResidualBlock(hidden_dim, hidden_dim, dropout=dropout)
-            for _ in range(n_layers - 2)
+            ResidualBlock(hidden_dim*2**i, hidden_dim*2**(i+1), dropout=dropout)
+            for i in range(n_layers - 2)
         ])
 
         # Final layer: from hidden_dim -> 2 * n_nodes*(n_nodes - 1)//2
