@@ -70,7 +70,7 @@ parser.add_argument('--n-layers-decoder', type=int, default=6)
 parser.add_argument('--spectral-emb-dim', type=int, default=10)
 
 # Number of training epochs for the denoising model
-parser.add_argument('--epochs-denoise', type=int, default=30)
+parser.add_argument('--epochs-denoise', type=int, default=10)
 
 # Number of timesteps in the diffusion
 parser.add_argument('--timesteps', type=int, default=500)
