@@ -75,10 +75,6 @@ class Decoder(nn.Module):
         adj = adj + torch.transpose(adj, 1, 2)
         return adj
 
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from typing import List, Tuple
 
 

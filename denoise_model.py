@@ -159,19 +159,6 @@ def extract(arr, timesteps, broadcast_shape):
 
 
 def q_sample(x_start, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=None):
-    """
-    Forward diffusion sampling process.
-
-    Args:
-        x_start (torch.Tensor): Initial sample
-        t (torch.Tensor): Timesteps
-        sqrt_alphas_cumprod (torch.Tensor): Cumulative product of sqrt alphas
-        sqrt_one_minus_alphas_cumprod (torch.Tensor): Cumulative product of sqrt(1-alphas)
-        noise (torch.Tensor, optional): Pre-generated noise. If None, will generate random noise
-
-    Returns:
-        torch.Tensor: Noised sample at specified timestep
-    """
     device = x_start.device
 
     if noise is None:
@@ -200,22 +187,6 @@ def q_sample(x_start, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noi
 
 def p_losses(denoise_model, x_start, t, cond, sqrt_alphas_cumprod,
              sqrt_one_minus_alphas_cumprod, noise=None, loss_type="l1"):
-    """
-    Calculate loss for denoising model training.
-
-    Args:
-        denoise_model (torch.nn.Module): The denoising model
-        x_start (torch.Tensor): Initial clean sample
-        t (torch.Tensor): Timesteps
-        cond (torch.Tensor): Conditional information
-        sqrt_alphas_cumprod (torch.Tensor): Cumulative product of sqrt alphas
-        sqrt_one_minus_alphas_cumprod (torch.Tensor): Cumulative product of sqrt(1-alphas)
-        noise (torch.Tensor, optional): Pre-generated noise. If None, will generate random noise
-        loss_type (str): Type of loss to use ('l1', 'l2', or 'huber')
-
-    Returns:
-        torch.Tensor: Computed loss value
-    """
     device = x_start.device
 
     # Generate or move noise to correct device
