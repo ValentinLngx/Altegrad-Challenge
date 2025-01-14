@@ -23,7 +23,7 @@ from torch_geometric.loader import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from autoencoder import VariationalAutoEncoder
 from denoise_model import DenoiseNN, p_losses, sample, ImprovedDenoiseNN, test_gaussian_properties, q_sample
-from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset, get_diffusion_parameters, modified_beta_schedule
+from utils import linear_beta_schedule, construct_nx_from_adj, preprocess_dataset, get_diffusion_parameters
 
 scaler = StandardScaler()
 from torch.utils.data import Subset
