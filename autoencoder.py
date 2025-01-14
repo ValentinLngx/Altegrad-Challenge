@@ -14,22 +14,21 @@ class Decoder(nn.Module):
 
         # Adjusting the input size of the first layer to account for the concatenated stats vector
         mlp_layers = [nn.Linear(latent_dim + 7, hidden_dim)] + [
-            nn.Linear(hidden_dim*(2**i), hidden_dim*(2**(i+1))) for i in range(n_layers - 2)
+            nn.Linear(hidden_dim*(2**i)+7, hidden_dim*(2**(i+1))) for i in range(n_layers - 2)
         ]
-        mlp_layers.append(nn.Linear(hidden_dim*2**(n_layers-2), n_nodes * (n_nodes - 1)))
+        mlp_layers.append(nn.Linear(hidden_dim*2**(n_layers-2)+7, n_nodes * (n_nodes - 1)))
 
         self.mlp = nn.ModuleList(mlp_layers)
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, stats):
-        # Concatenate the stats vector to the latent representation
-        x = torch.cat((x, stats), dim=-1)
-
         # Pass through the MLP layers
         for i in range(self.n_layers - 1):
+            x = torch.cat((x, stats), dim=-1) 
             x = self.relu(self.mlp[i](x))
-
+            
+        x = torch.cat((x, stats), dim=-1)   
         x = self.mlp[self.n_layers - 1](x)
         x = torch.reshape(x, (x.size(0), -1, 2))
         x = F.gumbel_softmax(x, tau=1, hard=True)[:, :, 0]
