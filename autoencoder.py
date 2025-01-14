@@ -73,21 +73,29 @@ class Decoder(nn.Module):
         idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
         adj[:, idx[0], idx[1]] = x
         adj = adj + torch.transpose(adj, 1, 2)
+
+        batch_size = adj.size(0)
+        for b in range(batch_size):
+            n_nodes = int(stats[b][0].item())  # Number of nodes for this batch
+            adj[b, n_nodes:, :] = 0  # Mask rows beyond n_nodes
+            adj[b, :, n_nodes:] = 0  # Mask columns beyond n_nodes
+
         return adj
 
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_dim, hidden_dim, dropout=0.05):
         super(ResidualBlock, self).__init__()
-        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.fc1 = nn.Linear(in_dim + 7, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, in_dim)
         self.dropout = nn.Dropout(dropout)
         self.activation = nn.ReLU()
 
-    def forward(self, x):
+    def forward(self, x, stats):
         # x has shape: (batch_size, in_dim)
         identity = x
-        out = self.activation(self.fc1(x))
+        out = torch.cat((x, stats), dim=-1) 
+        out = self.activation(self.fc1(out))
         out = self.dropout(out)
         out = self.fc2(out)
         return self.activation(out + identity)  # skip connection + activation
@@ -102,41 +110,32 @@ class FastDecoder(nn.Module):
         self.tau = initial_tau
         self.final_tau = final_tau
         self.tau_decay = tau_decay
-        # First layer: from (latent_dim + 7) to hidden_dim
-        # so dimension changes from (latent_dim + 7) -> hidden_dim
+
         self.input_fc = nn.Linear(latent_dim + 7, hidden_dim)
 
-        # Residual blocks (each keeps dimension == hidden_dim)
-        # We'll do n_layers - 2 residual blocks to match your original structure
         self.res_blocks = nn.ModuleList([
             ResidualBlock(hidden_dim, hidden_dim, dropout=dropout)
             for _ in range(n_layers - 2)
         ])
 
-        # Final layer: from hidden_dim -> 2 * n_nodes*(n_nodes - 1)//2
-        self.output_fc = nn.Linear(hidden_dim, 2 * n_nodes * (n_nodes - 1) // 2)
+        self.output_fc = nn.Linear(
+            hidden_dim, 2 * n_nodes * (n_nodes - 1) // 2
+        )
 
     def forward(self, x, stats):
-        # Concatenate the stats vector to the latent representation
-        x = torch.cat((x, stats), dim=-1)  # shape: (batch_size, latent_dim+7)
 
-        # First layer + activation
-        x = F.relu(self.input_fc(x))  # shape: (batch_size, hidden_dim)
+        x = torch.cat((x, stats), dim=-1)             
+        x = F.relu(self.input_fc(x))                   
 
-        # Pass through residual blocks
         for block in self.res_blocks:
-            x = block(x)  # still (batch_size, hidden_dim)
+            x = block(x, stats)                       
 
-        # Final linear layer (no activation here, since we do gumbel_softmax next)
-        x = self.output_fc(x)  # shape: (batch_size, 2*num_edges)
-
+        x = self.output_fc(x)                       
         # Reshape to (batch_size, num_edges, 2)
         x = torch.reshape(x, (x.size(0), -1, 2))
 
-        # Gumbel softmax
-        x = F.gumbel_softmax(x, tau=self.tau, hard=True)[:, :, 0] # shape: (batch_size, num_edges)
-
-        # Build adjacency matrix
+        x = F.gumbel_softmax(x, tau=self.tau, hard=True)[:, :, 0]
+        
         adj = torch.zeros(x.size(0), self.n_nodes, self.n_nodes, device=x.device)
         idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
         adj[:, idx[0], idx[1]] = x
@@ -144,9 +143,9 @@ class FastDecoder(nn.Module):
 
         batch_size = adj.size(0)
         for b in range(batch_size):
-            n_nodes = int(stats[b][0].item())  # Number of nodes for this batch
-            adj[b, n_nodes:, :] = 0  # Mask rows beyond n_nodes
-            adj[b, :, n_nodes:] = 0  # Mask columns beyond n_nodes
+            n_nodes = int(stats[b][0].item())
+            adj[b, n_nodes:, :] = 0
+            adj[b, :, n_nodes:] = 0
 
         return adj
 
@@ -256,6 +255,7 @@ class VariationalAutoEncoder(nn.Module):
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
 
+        # Still using L1, but you might consider BCEWithLogitsLoss if your decoder outputs logits.
         recon = F.l1_loss(adj, data.A, reduction="mean")
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
         loss = recon + beta * kld

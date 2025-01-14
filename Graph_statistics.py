@@ -389,7 +389,7 @@ def refine_graph(initial_graph, target_stats, stat_train, steps=50, init_temp=1.
     return best_graph
 
 
-def refine_graph():
+def refine_graphs():
 
     stat_train = save_train_statistics()
 
