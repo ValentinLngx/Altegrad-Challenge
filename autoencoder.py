@@ -83,6 +83,7 @@ class Decoder(nn.Module):
         return adj
 
 
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_dim, hidden_dim, dropout=0.05):
         super(ResidualBlock, self).__init__()
