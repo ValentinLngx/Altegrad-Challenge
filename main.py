@@ -137,7 +137,7 @@ if args.train_autoencoder:
         for data in train_loader:
             data = data.to(device)
             optimizer.zero_grad()
-            loss, recon, kld, mae  = autoencoder.loss_function(data, data.stats)
+            loss, recon, kld  = autoencoder.loss_function(data, data.stats)
             train_loss_all_recon += recon.item()
             train_loss_all_kld += kld.item()
             cnt_train+=1
@@ -239,8 +239,8 @@ if args.train_denoiser:
             # If not Gaussian enough and not at max timesteps, increase timesteps
             if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.2) and current_timesteps < 500000:
                 current_timesteps = min(current_timesteps + 1000, 500000)
-                print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
-                print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
+                #print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
+                #print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
                 # Recalculate diffusion parameters with new timesteps
                 diff_params = get_diffusion_parameters(current_timesteps, beta_schedule="cosine")
                 betas = diff_params['betas']
@@ -339,3 +339,10 @@ with open("output.csv", "w", newline="") as csvfile:
             edge_list_text = ", ".join([f"({u}, {v})" for u, v in Gs_generated.edges()])           
             # Write the graph ID and the full edge list as a single row
             writer.writerow([graph_id, edge_list_text])
+
+
+from Graph_statistics import get_score
+get_score()
+
+#from Graph_statistics import refine_graph
+#refine_graph()

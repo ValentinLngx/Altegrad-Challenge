@@ -267,17 +267,17 @@ class ImprovedDenoiseNN(nn.Module):
         self.cond_mlp = nn.Sequential(
             nn.Linear(n_cond, d_cond),
             nn.LayerNorm(d_cond),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Linear(d_cond, d_cond),
             nn.LayerNorm(d_cond),
-            nn.SiLU(),
+            nn.ReLU(),
         )
         
         # Time embedding
         self.time_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
         
@@ -294,7 +294,7 @@ class ImprovedDenoiseNN(nn.Module):
                 'block': nn.Sequential(
                     nn.Linear(hidden_dim, hidden_dim),
                     nn.LayerNorm(hidden_dim),
-                    nn.SiLU(),
+                    nn.ReLU(),
                 ),
                 'time_proj': nn.Linear(hidden_dim, hidden_dim),
                 'cond_proj': nn.Linear(d_cond, hidden_dim)

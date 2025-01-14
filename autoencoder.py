@@ -54,7 +54,7 @@ class Decoder(nn.Module):
         mlp_layers.append(nn.Linear(hidden_dim, 2 * n_nodes * (n_nodes - 1) // 2))
 
         self.mlp = nn.ModuleList(mlp_layers)
-        self.silu = nn.SiLU()
+        self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, stats):
@@ -63,7 +63,7 @@ class Decoder(nn.Module):
 
         # Pass through the MLP layers
         for i in range(self.n_layers - 1):
-            x = self.silu(self.mlp[i](x))
+            x = self.relu(self.mlp[i](x))
 
         x = self.mlp[self.n_layers - 1](x)
         x = torch.reshape(x, (x.size(0), -1, 2))
@@ -82,7 +82,7 @@ class ResidualBlock(nn.Module):
         self.fc1 = nn.Linear(in_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, in_dim)
         self.dropout = nn.Dropout(dropout)
-        self.activation = nn.SiLU()
+        self.activation = nn.ReLU()
 
     def forward(self, x):
         # x has shape: (batch_size, in_dim)
@@ -121,7 +121,7 @@ class FastDecoder(nn.Module):
         x = torch.cat((x, stats), dim=-1)  # shape: (batch_size, latent_dim+7)
 
         # First layer + activation
-        x = F.silu(self.input_fc(x))  # shape: (batch_size, hidden_dim)
+        x = F.relu(self.input_fc(x))  # shape: (batch_size, hidden_dim)
 
         # Pass through residual blocks
         for block in self.res_blocks:
@@ -141,6 +141,12 @@ class FastDecoder(nn.Module):
         idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
         adj[:, idx[0], idx[1]] = x
         adj = adj + torch.transpose(adj, 1, 2)
+
+        batch_size = adj.size(0)
+        for b in range(batch_size):
+            n_nodes = int(stats[b][0].item())  # Number of nodes for this batch
+            adj[b, n_nodes:, :] = 0  # Mask rows beyond n_nodes
+            adj[b, :, n_nodes:] = 0  # Mask columns beyond n_nodes
 
         return adj
 
@@ -243,7 +249,7 @@ class VariationalAutoEncoder(nn.Module):
         adj = self.decoder(mu, stats)
         return adj
 
-    def loss_function(self, data, stats, beta=0.05):
+    def loss_function(self, data, stats, beta=0.005):
         x_g = self.encoder(data)
         mu = self.fc_mu(x_g)
         logvar = self.fc_logvar(x_g)
