@@ -123,6 +123,7 @@ optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.lr)
 scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs_autoencoder, eta_min=1e-6)
 
 
+
 # Train VGAE model
 if args.train_autoencoder:
     best_val_loss = np.inf
