@@ -108,7 +108,7 @@ validset = preprocess_dataset("valid", args.n_max_nodes, args.spectral_emb_dim)
 testset = preprocess_dataset("test", args.n_max_nodes, args.spectral_emb_dim)
 
 
-
+print('ok')
 # initialize data loaders
 train_loader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
 val_loader = DataLoader(validset, batch_size=args.batch_size, shuffle=False)
