@@ -181,94 +181,97 @@ else:
 autoencoder.eval()
 
 
+# Check if CUDA is available and set the device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 diff_params = get_diffusion_parameters(args.timesteps, beta_schedule="cosine")
-betas = diff_params['betas']
-alphas = diff_params['alphas']
-alphas_cumprod = diff_params['alphas_cumprod']
-alphas_cumprod_prev = diff_params['alphas_cumprod_prev']
-sqrt_recip_alphas = diff_params['sqrt_recip_alphas']
-sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod']
-sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod']
-posterior_variance = diff_params['posterior_variance']
+# Move all tensors to GPU
+betas = diff_params['betas'].to(device)
+alphas = diff_params['alphas'].to(device)
+alphas_cumprod = diff_params['alphas_cumprod'].to(device)
+alphas_cumprod_prev = diff_params['alphas_cumprod_prev'].to(device)
+sqrt_recip_alphas = diff_params['sqrt_recip_alphas'].to(device)
+sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod'].to(device)
+sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod'].to(device)
+posterior_variance = diff_params['posterior_variance'].to(device)
 
-# initialize denoising model
+# Initialize denoising model
 denoise_model = ImprovedDenoiseNN(
     input_dim=args.latent_dim,
     hidden_dim=args.hidden_dim_denoise,
     n_layers=args.n_layers_denoise,
     n_cond=args.n_condition,
     d_cond=args.dim_condition
-).to(device)
+).to(device)  # This is already correct in your code
+
 optimizer = torch.optim.Adam(denoise_model.parameters(), lr=args.lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
 
-# Train denoising model
+# Training loop modifications
 if args.train_denoiser:
-    best_val_loss = np.inf
+    best_val_loss = float('inf')
     current_timesteps = args.timesteps
-    for epoch in range(1, args.epochs_denoise+1):
+
+    for epoch in range(1, args.epochs_denoise + 1):
         denoise_model.train()
         train_loss_all = 0
         train_count = 0
 
         # Recalculate diffusion parameters with current_timesteps
         diff_params = get_diffusion_parameters(current_timesteps, beta_schedule="cosine")
-        betas = diff_params['betas']
-        alphas = diff_params['alphas']
-        alphas_cumprod = diff_params['alphas_cumprod']
-        alphas_cumprod_prev = diff_params['alphas_cumprod_prev']
-        sqrt_recip_alphas = diff_params['sqrt_recip_alphas']
-        sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod']
-        sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod']
-        posterior_variance = diff_params['posterior_variance']
+        # Move all new tensors to GPU
+        betas = diff_params['betas'].to(device)
+        alphas = diff_params['alphas'].to(device)
+        alphas_cumprod = diff_params['alphas_cumprod'].to(device)
+        alphas_cumprod_prev = diff_params['alphas_cumprod_prev'].to(device)
+        sqrt_recip_alphas = diff_params['sqrt_recip_alphas'].to(device)
+        sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod'].to(device)
+        sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod'].to(device)
+        posterior_variance = diff_params['posterior_variance'].to(device)
 
         for data in train_loader:
+            # Make sure data is moved to GPU
             data = data.to(device)
             optimizer.zero_grad()
-            x_g = autoencoder.encode(data)
 
-            # Test Gaussian properties of fully noised latent
-            t_final = torch.full((x_g.size(0),), current_timesteps - 1, device=device, dtype=torch.long)
-            noise = torch.randn_like(x_g)
-            z_T = q_sample(x_g, t_final, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=noise)
+            with torch.cuda.amp.autocast():  # Enable automatic mixed precision
+                x_g = autoencoder.encode(data)
+                t_final = torch.full((x_g.size(0),), current_timesteps - 1, device=device, dtype=torch.long)
+                noise = torch.randn_like(x_g)
+                z_T = q_sample(x_g, t_final, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=noise)
 
-            # Test if z_T is Gaussian
-            test_results = test_gaussian_properties(z_T)
+                # Test Gaussian properties
+                test_results = test_gaussian_properties(z_T)
 
-            # If not Gaussian enough and not at max timesteps, increase timesteps
-            if (not test_results['is_gaussian'] or test_results['confidence_score'] < 0.2) and current_timesteps < 100000:
-                current_timesteps = min(current_timesteps + 1000, 100000)
-                print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
-                print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
-                # Recalculate diffusion parameters with new timesteps
-                diff_params = get_diffusion_parameters(current_timesteps, beta_schedule="cosine")
-                betas = diff_params['betas']
-                alphas = diff_params['alphas']
-                alphas_cumprod = diff_params['alphas_cumprod']
-                alphas_cumprod_prev = diff_params['alphas_cumprod_prev']
-                sqrt_recip_alphas = diff_params['sqrt_recip_alphas']
-                sqrt_alphas_cumprod = diff_params['sqrt_alphas_cumprod']
-                sqrt_one_minus_alphas_cumprod = diff_params['sqrt_one_minus_alphas_cumprod']
-                posterior_variance = diff_params['posterior_variance']
+                if (not test_results['is_gaussian'] or test_results[
+                    'confidence_score'] < 0.2) and current_timesteps < 100000:
+                    current_timesteps = min(current_timesteps + 1000, 100000)
+                    print(f"\nEpoch {epoch}: Increasing timesteps to {current_timesteps}")
+                    print(f"Gaussian test confidence: {test_results['confidence_score']:.4f}")
 
-            # Sample random timestep for training
-            t = torch.randint(0, current_timesteps, (x_g.size(0),), device=device).long()
+                    # Recalculate and move to GPU
+                    diff_params = get_diffusion_parameters(current_timesteps, beta_schedule="cosine")
+                    for key in diff_params:
+                        diff_params[key] = diff_params[key].to(device)
 
+                    # Update local variables
+                    locals().update(diff_params)
 
-            loss = p_losses(
-                denoise_model,
-                x_g,
-                t, 
-                data.stats,
-                sqrt_alphas_cumprod, 
-                sqrt_one_minus_alphas_cumprod,
-                loss_type="huber"
-            )
+                t = torch.randint(0, current_timesteps, (x_g.size(0),), device=device).long()
+                loss = p_losses(
+                    denoise_model,
+                    x_g,
+                    t,
+                    data.stats,
+                    sqrt_alphas_cumprod,
+                    sqrt_one_minus_alphas_cumprod,
+                    loss_type="huber"
+                )
+
             loss.backward()
-
             torch.nn.utils.clip_grad_norm_(
-                [p for n, p in denoise_model.named_parameters() if "attention" in n], 
+                [p for n, p in denoise_model.named_parameters() if "attention" in n],
                 max_norm=1.0
             )
             optimizer.step()
@@ -276,20 +279,29 @@ if args.train_denoiser:
             train_loss_all += x_g.size(0) * loss.item()
             train_count += x_g.size(0)
 
+        # Validation loop
         denoise_model.eval()
         val_loss_all = 0
         val_count = 0
-        for data in val_loader:
-            data = data.to(device)
-            x_g = autoencoder.encode(data)
-            t = torch.randint(0, current_timesteps, (x_g.size(0),), device=device).long()
-            loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, loss_type="huber")
-            val_loss_all += x_g.size(0) * loss.item()
-            val_count += x_g.size(0)
+
+        with torch.no_grad():  # Add no_grad context for validation
+            for data in val_loader:
+                data = data.to(device)
+                with torch.cuda.amp.autocast():  # Enable automatic mixed precision
+                    x_g = autoencoder.encode(data)
+                    t = torch.randint(0, current_timesteps, (x_g.size(0),), device=device).long()
+                    loss = p_losses(denoise_model, x_g, t, data.stats, sqrt_alphas_cumprod,
+                                    sqrt_one_minus_alphas_cumprod, loss_type="huber")
+                val_loss_all += x_g.size(0) * loss.item()
+                val_count += x_g.size(0)
 
         if epoch % 5 == 0:
             dt_t = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            print('{} Epoch: {:04d}, Train Loss: {:.5f}, Val Loss: {:.5f}'.format(dt_t, epoch, train_loss_all/train_count, val_loss_all/val_count))
+            print('{} Epoch: {:04d}, Train Loss: {:.5f}, Val Loss: {:.5f}'.format(
+                dt_t, epoch, train_loss_all / train_count, val_loss_all / val_count))
+            # Add GPU memory usage monitoring
+            print(
+                f'GPU Memory: {torch.cuda.memory_allocated() / 1024 ** 2:.1f}MB allocated, {torch.cuda.memory_reserved() / 1024 ** 2:.1f}MB reserved')
 
         scheduler.step()
 
@@ -297,10 +309,10 @@ if args.train_denoiser:
             best_val_loss = val_loss_all
             torch.save({
                 'state_dict': denoise_model.state_dict(),
-                'optimizer' : optimizer.state_dict(),
+                'optimizer': optimizer.state_dict(),
             }, 'denoise_model.pth.tar')
 else:
-    checkpoint = torch.load('denoise_model.pth.tar')
+    checkpoint = torch.load('denoise_model.pth.tar', map_location=device)  # Add map_location
     denoise_model.load_state_dict(checkpoint['state_dict'])
 
 denoise_model.eval()
