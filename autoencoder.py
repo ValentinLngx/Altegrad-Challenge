@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch_geometric.nn import GINConv
-from torch_geometric.nn import global_add_pool
+from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool
 
 # Decoder
 """class Decoder(nn.Module):
