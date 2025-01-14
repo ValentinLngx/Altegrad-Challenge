@@ -10,6 +10,8 @@ import csv
 from torch import FloatTensor
 from extract_feats import extract_numbers, extract_feats
 
+random.seed(4200)
+np.random.seed(4200)
 
 def compute_graph_stats(adj):
     """
@@ -17,9 +19,6 @@ def compute_graph_stats(adj):
     Returns a vector of:
     [num_nodes, num_edges, average_degree, num_triangles, global_clustering, max_kcore, num_communities]
     """
-
-    random.seed(42)
-    np.random.seed(42)
 
     # Ensure adjacency is a NumPy array
     if isinstance(adj, torch.Tensor):
@@ -51,8 +50,10 @@ def compute_graph_stats(adj):
     max_kcore = max(cores.values())
 
     # Number of communities (Louvain method)
-    partition = community_louvain.best_partition(G)
-    num_communities = len(set(partition.values()))
+    num_repeats = 20
+    communities_list = [len(set(community_louvain.best_partition(G.copy()).values()))
+                        for _ in range(num_repeats)]
+    num_communities = np.mean(communities_list)
 
     return [
         int(num_nodes), 
@@ -284,7 +285,152 @@ def get_score():
 get_score()
 
 
+def cost(G, target_stats, stat_train):
+    """
+    Compute a mae cost between the statistics of graph G
+    and the target statistics vector.
+    """
+    current_stats = compute_graph_stats(G)
+    stats_pred_norm_using_train = z_normalize_using_train(current_stats, stat_train)
+    stats_real_norm_using_train = z_normalize_using_train(target_stats, stat_train)
+
+    
+    diff = stats_pred_norm_using_train - stats_real_norm_using_train
+    mae = np.mean(np.abs(diff))
+    return mae
+
+
+def propose_modification(G):
+    """
+    Propose a new graph by modifying G either by a single edge flip or a block move
+    (an edge swap between two pairs of nodes).
+    """
+    G_new = G.copy()
+    # Decide randomly which move to try.
+    if random.random() < 0.5:
+        # --- Single edge flip ---
+        nodes = list(G_new.nodes())
+        if len(nodes) < 2:
+            return G_new
+        u, v = random.sample(nodes, 2)
+        if G_new.has_edge(u, v):
+            G_new.remove_edge(u, v)
+        else:
+            G_new.add_edge(u, v)
+    else:
+        # --- Block move: attempt an edge swap ---
+        edges = list(G_new.edges())
+        if len(edges) < 2:
+            return G_new
+        # Randomly select two edges
+        e1, e2 = random.sample(edges, 2)
+        u, v = e1
+        x, y = e2
+        
+        # Avoid swapping if any nodes are repeated (to prevent self-loops or parallel issues)
+        if len({u, v, x, y}) < 4:
+            return G_new  # No operation if nodes are not distinct
+
+        # Option 1: Swap to form edges (u, x) and (v, y)
+        if not G_new.has_edge(u, x) and not G_new.has_edge(v, y) and u != x and v != y:
+            G_new.remove_edge(u, v)
+            G_new.remove_edge(x, y)
+            G_new.add_edge(u, x)
+            G_new.add_edge(v, y)
+        # Option 2: Swap to form edges (u, y) and (v, x)
+        elif not G_new.has_edge(u, y) and not G_new.has_edge(v, x) and u != y and v != x:
+            G_new.remove_edge(u, v)
+            G_new.remove_edge(x, y)
+            G_new.add_edge(u, y)
+            G_new.add_edge(v, x)
+        # Else, if neither swap is applicable, the move is skipped (i.e. a no-op).
+    return G_new
 
 
 
+def refine_graph(initial_graph, target_stats, stat_train, steps=50, init_temp=1.0, cooling_rate=0.999):
+    """
+    Refine the graph to match target_stats using simulated annealing.
+    
+    Parameters:
+      initial_graph: the starting NetworkX graph.
+      target_stats: the target 7-dimensional statistics (as a NumPy array).
+      steps: the number of iterations to run.
+      init_temp: initial temperature for simulated annealing.
+      cooling_rate: multiplicative cooling schedule (temperature *= cooling_rate each step).
+      weights: optional vector of weights for cost components.
+      
+    Returns:
+      The refined graph.
+    """
+    current_graph = initial_graph.copy()
+    current_cost = cost(current_graph.copy(), target_stats, stat_train)
+    best_graph = current_graph.copy()
+    best_cost = current_cost
+    temp = init_temp
+
+    for i in range(steps):
+        proposed_graph = propose_modification(current_graph.copy())
+        proposed_cost = cost(proposed_graph, target_stats, stat_train)
+        delta = proposed_cost - current_cost
+
+        # Accept move if cost is reduced or with a probability if it increases
+        #if delta < 0 or random.random() < np.exp(-delta / temp):
+        if delta < 0:
+            current_graph = proposed_graph
+            current_cost = proposed_cost
+            if current_cost < best_cost:
+                best_graph = current_graph.copy()
+                best_cost = current_cost
+                #print("new best cost found: ", cost(proposed_graph, target_stats, stat_train))
+
+        # Cool down the system.
+        temp *= cooling_rate
+
+        # Logging every 1000 iterations.
+        #if i % 1000 == 0:
+        #    print(f"Step {i}: current cost = {current_cost:.3f}, best cost = {best_cost:.3f}, temp = {temp:.3f}")
+
+    return best_graph
+
+
+def refine_graph():
+
+    stat_train = save_train_statistics()
+
+    file_path = "output.csv"
+    edges_lists = load_edgenodes_from_csv(file_path)
+    stats = save_test_statistics()
+
+    refined_edgelists = []
+    for i, edgelist in enumerate(edges_lists):
+        
+        G = nx.Graph()
+        G.add_edges_from(edgelist[1])
+        mae = cost(G, stats[i], stat_train)
+        print("Initial Graph ", i, " MAE: ", mae)
+        #print("Initial Graph Edges: ", list(G.edges()))
+
+        refined_G = refine_graph(G.copy(), stats[i], stat_train)
+        refined_edgelist = list(refined_G.edges())
+        mae = cost(refined_G.copy(), stats[i], stat_train)
+        print("Refined Graph ", i, " MAE: ", mae)
+        #print("Refined Graph Edges: ", refined_edgelist)
+        refined_edgelists.append(refined_edgelist)
+
+
+    # Save refined edgelists to a CSV file
+    with open("output2.csv", "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        # Write the header
+        writer.writerow(["graph_id", "edge_list"])
+        
+        for graph_id, edgelist in enumerate(tqdm(refined_edgelists, desc="Saving edgelists")):
+            # Convert the edge list to a single string
+            edge_list_text = ", ".join([f"({u}, {v})" for u, v in edgelist])
+            # Write the graph ID and edge list to the CSV file
+            writer.writerow([f"graph_{graph_id}", edge_list_text])
+
+
+    get_score("output2.csv")
 

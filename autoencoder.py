@@ -38,6 +38,13 @@ class Decoder(nn.Module):
         idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
         adj[:, idx[0], idx[1]] = x
         adj = adj + torch.transpose(adj, 1, 2)
+
+        batch_size = adj.size(0)
+        for b in range(batch_size):
+            n_nodes = int(stats[b][0].item())  # Number of nodes for this batch
+            adj[b, n_nodes:, :] = 0  # Mask rows beyond n_nodes
+            adj[b, :, n_nodes:] = 0  # Mask columns beyond n_nodes
+
         return adj
 
 
@@ -131,7 +138,7 @@ class VariationalAutoEncoder(nn.Module):
         adj = self.decoder(mu, stats)
         return adj
 
-    def loss_function(self, data, stats, beta=0.05):
+    def loss_function(self, data, stats, beta=0.005):
         x_g = self.encoder(data)
         mu = self.fc_mu(x_g)
         logvar = self.fc_logvar(x_g)

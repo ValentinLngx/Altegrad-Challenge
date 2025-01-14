@@ -287,6 +287,5 @@ with open("output.csv", "w", newline="") as csvfile:
             # Write the graph ID and the full edge list as a single row
             writer.writerow([graph_id, edge_list_text])
 
-
 from Graph_statistics import get_score
 get_score()
