@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 from torch_geometric.nn import GINConv
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool
+from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import add_self_loops
 
 # Decoder
 """class Decoder(nn.Module):
@@ -292,7 +294,7 @@ class FastDecoder(nn.Module):
         out = self.fc(out)
         return out
 """
-
+"""
 class GIN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
         super().__init__()
@@ -375,7 +377,265 @@ class GIN(torch.nn.Module):
         out = out + pooled  # Residual connection
         out = self.fc2(out)
 
+        return out"""
+
+class VirtualNode(nn.Module):
+    """
+    Manages a learnable 'virtual node' embedding that is updated
+    by aggregating representations of real nodes at each layer
+    and redistributing them back to the nodes.
+    """
+    def __init__(self, hidden_dim, n_layers):
+        super().__init__()
+        # One embedding for each layer or a single embedding reused
+        self.embedding = nn.Parameter(torch.zeros(n_layers, hidden_dim))
+        # Initialize to small random values
+        nn.init.xavier_uniform_(self.embedding.view(n_layers, 1, hidden_dim))
+
+        # MLP used to update the virtual node after aggregation
+        self.mlp = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim)
+            )
+            for _ in range(n_layers)
+        ])
+
+    def forward(self, x, batch, layer_idx):
+        """
+        x: (N, hidden_dim) Node embeddings
+        batch: (N,) Batch index
+        layer_idx: which GNN layer we are in
+        """
+        # Aggregate from real nodes
+        vn = self.embedding[layer_idx].unsqueeze(0)  # (1, hidden_dim)
+        # Summation from nodes -> single vector per graph
+        vn_batch = global_add_pool(x, batch)  # (batch_size, hidden_dim)
+        # We assume a single graph or we do it per graph if multiple graphs in a batch
+        # For multiple graphs, we'd repeat the virtual node for each graph
+        # but for simplicity, we treat single-graph scenario or do the same for each subgraph
+
+        # Update the virtual node
+        vn_updated = self.mlp[layer_idx](vn_batch)
+
+        # Redistribute the virtual node info back to the real nodes
+        x = x + vn_updated[batch]
+
+        return x, vn_updated
+
+
+########################################################################
+# Optional: Attention-based Jumping Knowledge
+########################################################################
+class JumpingKnowledgeAttn(nn.Module):
+    """
+    Performs an attention-based combination of multiple
+    layer representations [h1, h2, ..., hL].
+    """
+    def __init__(self, hidden_dim, n_layers):
+        super().__init__()
+        self.attn_weights = nn.Parameter(torch.zeros(n_layers, hidden_dim))
+        nn.init.xavier_uniform_(self.attn_weights)
+
+        # An additional projection layer for each representation
+        self.proj = nn.ModuleList([
+            nn.Linear(hidden_dim, hidden_dim) for _ in range(n_layers)
+        ])
+
+    def forward(self, hidden_states):
+        """
+        hidden_states: list of (N, hidden_dim)
+        Returns: (N, hidden_dim)
+        """
+        # We learn a separate attention key for each layer
+        # Then combine all layers in a data-dependent way
+        # For simplicity, do a scalar attention per layer
+        # or do a bigger transform if you want.
+        # We'll do a simple dot-product-based approach:
+        #    alpha_l = softmax(  h_l . W_l  )  across layers
+        # Then we weigh each h_l by alpha_l
+
+        # Stack hidden states: (L, N, hidden_dim)
+        stacked = torch.stack(hidden_states, dim=0)
+
+        # Weighted sums per layer
+        # shape of self.attn_weights: (L, hidden_dim)
+        # shape of stacked: (L, N, hidden_dim)
+        # do a small transform before attention
+        proj_list = []
+        for i, (h, proj) in enumerate(zip(stacked, self.proj)):
+            proj_list.append(proj(h))  # (N, hidden_dim)
+        proj_stacked = torch.stack(proj_list, dim=0)  # (L, N, hidden_dim)
+
+        # attention logits: (L, N)
+        logits = (proj_stacked * self.attn_weights[:, None, :]).sum(dim=-1)
+        # alpha: (L, N)
+        alpha = F.softmax(logits, dim=0)
+
+        # Weighted sum
+        out = (proj_stacked * alpha.unsqueeze(-1)).sum(dim=0)  # (N, hidden_dim)
         return out
+
+
+########################################################################
+# Enhanced MLP for GINConv
+########################################################################
+class GatedResidualMLP(nn.Module):
+    """
+    A Gated MLP that can serve as the update function in GIN.
+    Incorporates LayerNorm, dropout, and a residual gated connection.
+    """
+    def __init__(self, in_dim, out_dim, hidden_dim, dropout=0.2):
+        super().__init__()
+        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, out_dim)
+        self.norm2 = nn.LayerNorm(out_dim)
+        self.gate = nn.Linear(in_dim, out_dim)  # gating for residual
+        self.dropout = dropout
+
+    def forward(self, x):
+        residual = x
+        # Gate for the residual connection
+        gate = torch.sigmoid(self.gate(residual))
+
+        # MLP
+        out = F.gelu(self.norm1(self.fc1(x)))
+        out = F.dropout(out, p=self.dropout, training=self.training)
+        out = F.gelu(self.norm2(self.fc2(out)))
+        out = F.dropout(out, p=self.dropout, training=self.training)
+
+        # Gated residual
+        out = gate * out + (1 - gate) * residual
+        return out
+
+
+########################################################################
+# Main Enhanced GIN Model
+########################################################################
+class EnhancedGIN(nn.Module):
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim,
+        latent_dim,
+        n_layers,
+        dropout=0.2,
+        virtual_node=True,
+        aggregator_type="sum",  # "sum", "mean", "max"...
+        jk_mode="attention",    # "attention" or "weighted_sum" or "last"
+        use_vae=False,          # If True, outputs mu and logvar for a VAE
+    ):
+        super().__init__()
+        self.dropout = dropout
+        self.n_layers = n_layers
+        self.virtual_node = virtual_node
+        self.jk_mode = jk_mode
+        self.use_vae = use_vae
+
+        # Feature normalization
+        self.input_bn = nn.BatchNorm1d(input_dim)
+
+        # Define the aggregator function for GINConv
+        # By default GIN is "sum" aggregator. PyG's GINConv also allows "mean" or "max".
+        # We'll just do standard GINConv but you can adapt aggregator_type if needed
+        # in a custom aggregator. For demonstration, we keep it simple with GINConv.
+        def build_conv(in_dim, out_dim):
+            mlp = GatedResidualMLP(in_dim, out_dim, hidden_dim, dropout)
+            # GINConv aggregator is by default sum-based, but you can pass
+            # aggregator_type='mean' or 'max' by customizing a custom message passing.
+            return GINConv(nn=mlp, train_eps=True)
+
+        # Convs and norms
+        self.convs = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+
+        # First layer
+        self.convs.append(build_conv(input_dim, hidden_dim))
+        self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
+
+        # Hidden layers
+        for _ in range(n_layers - 1):
+            self.convs.append(build_conv(hidden_dim, hidden_dim))
+            self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
+
+        # Optional Virtual Node
+        if virtual_node:
+            self.virtualnode = VirtualNode(hidden_dim, n_layers)
+
+        # Jumping Knowledge
+        if jk_mode == "attention":
+            self.jump = JumpingKnowledgeAttn(hidden_dim, n_layers)
+        elif jk_mode == "weighted_sum":
+            self.jump_weights = nn.Parameter(torch.ones(n_layers))
+        else:
+            # 'last' or other simpler modes
+            self.jump = None
+
+        # Multi-head readout
+        self.pool_weight = nn.Parameter(torch.ones(3))
+
+        # Final projection: either deterministic or to (mu, logvar) for VAE
+        out_dim = 2 * latent_dim if use_vae else latent_dim
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, data):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+
+        # Initial BN
+        x = self.input_bn(x)
+
+        hidden_states = []
+
+        for layer_idx, (conv, bn) in enumerate(zip(self.convs, self.batch_norms)):
+            # Optional Virtual Node update (before or after conv, can experiment)
+            if self.virtual_node:
+                x, vn_embedding = self.virtualnode(x, batch, layer_idx)
+
+            x = conv(x, edge_index)
+            x = bn(x)
+            x = F.gelu(x)
+            x = F.dropout(x, self.dropout, training=self.training)
+
+            hidden_states.append(x)
+
+        # Jumping Knowledge
+        if self.jk_mode == "attention":
+            x = self.jump(hidden_states)  # (N, hidden_dim)
+        elif self.jk_mode == "weighted_sum":
+            weights = F.softmax(self.jump_weights, dim=0)
+            x = sum(w * h for w, h in zip(weights, hidden_states))
+        else:
+            # 'last' layer only
+            x = hidden_states[-1]
+
+        # Multi-head pooling across the final node embeddings
+        pool_weights = F.softmax(self.pool_weight, dim=0)
+        pooled = (
+            global_add_pool(x, batch) * pool_weights[0] +
+            global_mean_pool(x, batch) * pool_weights[1] +
+            global_max_pool(x, batch) * pool_weights[2]
+        )
+
+        # Final MLP projection
+        out = self.fc1(pooled)
+        out = self.layer_norm(out)
+        out = F.gelu(out)
+        out = F.dropout(out, self.dropout, training=self.training)
+        # residual
+        out = out + pooled
+        out = self.fc2(out)
+
+        # If VAE mode, split into mu and logvar
+        if self.use_vae:
+            mu, logvar = torch.split(out, out.size(-1)//2, dim=-1)
+            return mu, logvar  # You can then do the reparameterization
+        else:
+            return out
+
 
 # Variational Autoencoder
 class VariationalAutoEncoder(nn.Module):
