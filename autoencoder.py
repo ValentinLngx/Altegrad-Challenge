@@ -250,7 +250,7 @@ class FastDecoder(nn.Module):
             self.tau * self.tau_decay
         )
 
-class GIN(torch.nn.Module):
+"""class GIN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
         super().__init__()
         self.dropout = dropout
@@ -295,7 +295,91 @@ class GIN(torch.nn.Module):
         out = self.bn(out)
         out = self.fc(out)
         return out
+"""
 
+class GIN(torch.nn.Module):
+    def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
+        super().__init__()
+        self.dropout = dropout
+
+        self.input_bn = nn.BatchNorm1d(input_dim)
+
+        # MLP with skip connections and layer normalization
+        def enhanced_mlp(in_dim, out_dim):
+            return nn.Sequential(
+                nn.Linear(in_dim, hidden_dim * 2),
+                nn.LayerNorm(hidden_dim * 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 2, out_dim),
+                nn.LayerNorm(out_dim),
+                nn.GELU(),
+            )
+
+        # Trainable epsilon for each GIN layer
+        self.epsilons = nn.ParameterList([
+            nn.Parameter(torch.zeros(1)) for _ in range(n_layers)
+        ])
+
+        self.convs = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+
+        # First layer
+        self.convs.append(GINConv(enhanced_mlp(input_dim, hidden_dim), train_eps=True))
+        self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
+
+        # Hidden layers
+        for _ in range(n_layers - 1):
+            self.convs.append(GINConv(enhanced_mlp(hidden_dim, hidden_dim), train_eps=True))
+            self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
+
+        # Multi-head pooling
+        self.pool_weight = nn.Parameter(torch.ones(3))
+
+        # Output layers with residual connections
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, latent_dim)
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+
+        # Jump connections
+        self.jump = nn.Parameter(torch.ones(n_layers))
+
+    def forward(self, data):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+
+        # Initial normalization
+        x = self.input_bn(x)
+
+        # Store all intermediate representations
+        hidden_states = []
+
+        for conv, bn in zip(self.convs, self.batch_norms):
+            x = conv(x, edge_index)
+            x = bn(x)
+            x = F.dropout(x, self.dropout, training=self.training)
+            hidden_states.append(x)
+
+        # Jump connections (weighted sum of all layers)
+        jump_weights = F.softmax(self.jump, dim=0)
+        x = sum(h * w for h, w in zip(hidden_states, jump_weights))
+
+        # Multi-head pooling
+        pool_weights = F.softmax(self.pool_weight, dim=0)
+        pooled = (
+                global_add_pool(x, batch) * pool_weights[0] +
+                global_mean_pool(x, batch) * pool_weights[1] +
+                global_max_pool(x, batch) * pool_weights[2]
+        )
+
+        # Output with residual connection
+        out = self.fc1(pooled)
+        out = self.layer_norm(out)
+        out = F.gelu(out)
+        out = F.dropout(out, self.dropout, training=self.training)
+        out = out + pooled  # Residual connection
+        out = self.fc2(out)
+
+        return out
 
 # Variational Autoencoder
 class VariationalAutoEncoder(nn.Module):

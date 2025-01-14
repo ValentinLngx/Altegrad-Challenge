@@ -12,41 +12,104 @@ def extract(a, t, x_shape):
 
 ###########
 def test_gaussian_properties(z_T, significance_level=0.05):
-    """Test if z_T follows N(0,I)"""
-    z_np = z_T.cpu().detach().numpy()
+    # Convert to numpy in chunks if tensor is large
+    batch_size = 10000  # Adjust based on your GPU memory
+    num_samples = z_T.size(0)
 
-    # Test for zero mean
-    mean_test = np.mean(z_np, axis=0)
-    mean_p_value = stats.ttest_1samp(z_np, 0).pvalue
+    # Initialize lists to store results
+    mean_p_values = []
+    var_p_values = []
+    all_data = []
 
-    # Test for unit variance
-    var_test = np.var(z_np, axis=0)
-    var_p_value = stats.chi2.sf((z_np.shape[0] - 1) * var_test, df=z_np.shape[0] - 1)
+    # Process in batches to avoid memory issues
+    for i in range(0, num_samples, batch_size):
+        end_idx = min(i + batch_size, num_samples)
+        chunk = z_T[i:end_idx]
+        z_np_chunk = chunk.cpu().detach().numpy()
+        all_data.append(z_np_chunk)
 
-    # Mardia's test for multivariate normality
+        # Test for zero mean
+        mean_test = np.mean(z_np_chunk, axis=0)
+        mean_p_value = stats.ttest_1samp(z_np_chunk, 0).pvalue
+        mean_p_values.append(mean_p_value)
+
+        # Test for unit variance
+        var_test = np.var(z_np_chunk, axis=0)
+        var_p_value = stats.chi2.sf(
+            (z_np_chunk.shape[0] - 1) * var_test,
+            df=z_np_chunk.shape[0] - 1
+        )
+        var_p_values.append(var_p_value)
+
+    # Combine results
+    z_np = np.concatenate(all_data, axis=0)
+    mean_p_value = np.mean(mean_p_values, axis=0)
+    var_p_value = np.mean(var_p_values, axis=0)
+
     def mardia_test(data):
+        """
+        Perform Mardia's test for multivariate normality
+
+        Args:
+            data (np.ndarray): Input data array
+
+        Returns:
+            tuple: (skewness p-value, kurtosis p-value)
+        """
         n = data.shape[0]
         p = data.shape[1]
-        data_centered = data - np.mean(data, axis=0)
-        S = np.cov(data_centered.T)
-        S_inv = np.linalg.inv(S)
 
-        # Skewness
-        b1p = np.mean([np.sum((data_centered @ S_inv @ data_centered[j].T) ** 3)
-                       for j in range(n)])
+        # Center the data
+        data_centered = data - np.mean(data, axis=0)
+
+        # Compute covariance matrix and its inverse
+        S = np.cov(data_centered.T)
+        try:
+            S_inv = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            # If matrix is singular, use pseudo-inverse
+            S_inv = np.linalg.pinv(S)
+
+        # Calculate Mardia's skewness
+        b1p = 0
+        batch_size = min(1000, n)  # Process in smaller batches
+        for j in range(0, n, batch_size):
+            end_idx = min(j + batch_size, n)
+            batch = data_centered[j:end_idx]
+            mahalanobis_distances = np.array([
+                np.sum((data_centered @ S_inv @ b.T) ** 3)
+                for b in batch
+            ])
+            b1p += np.sum(mahalanobis_distances)
+        b1p /= n ** 2
+
         skew_stat = (n / 6) * b1p
         skew_df = p * (p + 1) * (p + 2) / 6
         skew_p_value = stats.chi2.sf(skew_stat, skew_df)
 
-        # Kurtosis
-        b2p = np.mean([np.sum((data_centered @ S_inv @ data_centered[j].T) ** 2)
-                       for j in range(n)])
+        # Calculate Mardia's kurtosis
+        b2p = 0
+        for j in range(0, n, batch_size):
+            end_idx = min(j + batch_size, n)
+            batch = data_centered[j:end_idx]
+            kurtosis_distances = np.array([
+                np.sum((data_centered @ S_inv @ b.T) ** 2)
+                for b in batch
+            ])
+            b2p += np.sum(kurtosis_distances)
+        b2p /= n
+
         kurt_stat = (b2p - p * (p + 2)) / np.sqrt(8 * p * (p + 2) / n)
         kurt_p_value = 2 * (1 - stats.norm.cdf(abs(kurt_stat)))
 
         return skew_p_value, kurt_p_value
 
-    mardia_skew_p, mardia_kurt_p = mardia_test(z_np)
+    # Perform Mardia's test
+    try:
+        mardia_skew_p, mardia_kurt_p = mardia_test(z_np)
+    except Exception as e:
+        print(f"Warning: Mardia's test failed with error: {e}")
+        mardia_skew_p = mardia_kurt_p = 0.0
 
     # Calculate overall confidence score
     confidence_score = np.mean([
@@ -56,6 +119,7 @@ def test_gaussian_properties(z_T, significance_level=0.05):
         mardia_kurt_p
     ])
 
+    # Check if all tests pass
     is_gaussian = all([
         np.all(mean_p_value > significance_level),
         np.all(var_p_value > significance_level),
@@ -65,7 +129,7 @@ def test_gaussian_properties(z_T, significance_level=0.05):
 
     return {
         'is_gaussian': is_gaussian,
-        'confidence_score': confidence_score,
+        'confidence_score': float(confidence_score),  # Ensure it's a Python float
         'details': {
             'mean_p_value': mean_p_value,
             'var_p_value': var_p_value,
