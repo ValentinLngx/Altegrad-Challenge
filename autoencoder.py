@@ -446,22 +446,15 @@ class JumpingKnowledgeAttn(nn.Module):
 # Example VirtualNode (make sure it returns (x, vn_embedding) consistently).
 ##############################################################################
 class VirtualNode(nn.Module):
-    """
-    Simple Virtual Node aggregator.
-    Typically: pool node embeddings -> transform -> add back to node embeddings
-    """
-    def __init__(self, hidden_dim, num_layers):
+    def __init__(self, input_dim, hidden_dim, num_layers):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.vnode_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.vnode_proj = nn.Linear(input_dim, hidden_dim)  # Fix input size here
 
     def forward(self, x, batch, layer_idx):
-        # Pool all nodes into a virtual node
-        vn_embedding = global_mean_pool(x, batch)  # shape [batch_size, hidden_dim]
-        # Transform
-        vn_embedding = self.vnode_proj(vn_embedding)
-        # Add back to x
-        x = x + vn_embedding[batch]
+        vn_embedding = global_mean_pool(x, batch)  # Now shape [batch_size, input_dim]
+        vn_embedding = self.vnode_proj(vn_embedding)  # Now correctly maps to [batch_size, hidden_dim]
+        x = x + vn_embedding[batch]  # Add back virtual node embedding
         return x, vn_embedding
 
 
