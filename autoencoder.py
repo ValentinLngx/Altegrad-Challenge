@@ -480,7 +480,7 @@ class VariationalAutoEncoder(nn.Module):
         eps = torch.randn_like(std)
         return eps * std + mu
 
-    def loss_function(self, data, stats, beta=0.05):
+    def loss_function(self, data, stats, beta=0.01):  # ✅ Lower beta = better reconstruction
         mu, logvar = self.encoder(data)
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
@@ -494,6 +494,6 @@ class VariationalAutoEncoder(nn.Module):
         # KL-Divergence
         kld = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
 
-        loss = recon + beta * kld
+        loss = recon + beta * kld  # ✅ Better balance of KL and MSE
 
         return loss, recon, kld
