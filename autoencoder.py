@@ -534,7 +534,7 @@ class VariationalAutoEncoder(nn.Module):
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
 
-        # Apply sigmoid to bound values between [0,1]
+        # 🔥 FIX: Apply sigmoid **INSIDE the decoder**
         adj = torch.sigmoid(adj)
 
         return adj
@@ -557,11 +557,12 @@ class VariationalAutoEncoder(nn.Module):
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
 
-        # Ensure adj is in [0,1] to prevent large L1 loss
+        # 🔥 FIX: Sigmoid before computing loss
         adj = torch.sigmoid(adj)
 
         recon = F.l1_loss(adj, data.A, reduction="mean")
 
+        # 🔥 FIX: Use `mean()` instead of `sum()`
         kld = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
 
         loss = recon + beta * kld
