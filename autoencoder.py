@@ -467,16 +467,16 @@ class EnhancedGIN(nn.Module):
         input_dim,
         hidden_dim,
         latent_dim,
-        n_layers,
+        n_layers_enc,
         dropout=0.2,
-        virtual_node=True,
+        virtual_node=False,
         aggregator_type="sum",  # "sum", "mean", "max"...
         jk_mode="attention",    # "attention" or "weighted_sum" or "last"
         use_vae=False,          # If True, outputs mu and logvar for a VAE
     ):
         super().__init__()
         self.dropout = dropout
-        self.n_layers = n_layers
+        self.n_layers = n_layers_enc
         self.virtual_node = virtual_node
         self.jk_mode = jk_mode
         self.use_vae = use_vae
@@ -485,18 +485,12 @@ class EnhancedGIN(nn.Module):
         # Feature normalization
         self.input_bn = nn.BatchNorm1d(input_dim)
 
-        ######################################################################
-        # Define the GIN conv builder
-        ######################################################################
         def build_conv(in_dim, out_dim):
             mlp = GatedResidualMLP(in_dim, out_dim, hidden_dim, dropout)
             # GINConv aggregator defaults to sum-based;
             # to fully respect aggregator_type, you'd need a custom message passing.
             return GINConv(nn=mlp, train_eps=True)
 
-        ######################################################################
-        # Convs and norms
-        ######################################################################
         self.convs = nn.ModuleList()
         self.batch_norms = nn.ModuleList()
 
@@ -509,9 +503,6 @@ class EnhancedGIN(nn.Module):
             self.convs.append(build_conv(hidden_dim, hidden_dim))
             self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
 
-        ######################################################################
-        # Optional Virtual Node
-        ######################################################################
         if virtual_node:
             self.virtualnode = VirtualNode(hidden_dim, n_layers)
         else:
@@ -531,10 +522,6 @@ class EnhancedGIN(nn.Module):
             # 'last' or other simpler modes
             self.jump = None
 
-        ######################################################################
-        # Multi-head pooling readout
-        # We'll combine (add, mean, max) with learned weights
-        ######################################################################
         self.pool_weight = nn.Parameter(torch.ones(3))
 
         ######################################################################
