@@ -253,9 +253,12 @@ def calculate_mae(stats_pred, stats_real):
     # Calculate the MAE
     #mae = np.mean(np.abs(stats_pred_norm_using_train - stats_real_norm_using_train))
     mean_abs_error_per_dimension = np.mean(np.abs(stats_pred_norm_using_train - stats_real_norm_using_train), axis=0)
+  
+    max_abs = np.abs(stats_pred_norm_using_train - stats_real_norm_using_train).argmax(axis=1)
+    _, counts = np.unique(max_abs, return_counts=True)
     mae = np.mean(mean_abs_error_per_dimension)
     
-    return mae
+    return mae, counts
 
 def get_score(file_path="output.csv"):
 
@@ -276,9 +279,9 @@ def get_score(file_path="output.csv"):
     stats_test = save_test_statistics()
 
     #compute MAE Score
-    mae_score = calculate_mae(stats_output, stats_test)
+    mae_score, counts = calculate_mae(stats_output, stats_test)
     print("MAE Score:", mae_score)
-
+    print("Furthest prediction count:", counts)
 
 def cost(G, target_stats, stat_train):
     """

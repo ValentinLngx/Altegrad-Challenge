@@ -55,17 +55,17 @@ parser.add_argument('--epochs-autoencoder', type=int, default=100)
 
 # Hidden dimension sizes
 parser.add_argument('--hidden-dim-encoder', type=int, default=128)
-parser.add_argument('--hidden-dim-decoder', type=int, default=256)
+parser.add_argument('--hidden-dim-decoder', type=int, default=128)
 
 # Latent dimension
-parser.add_argument('--latent-dim', type=int, default=64)
+parser.add_argument('--latent-dim', type=int, default=128)
 
 # Max number of nodes
 parser.add_argument('--n-max-nodes', type=int, default=50)
 
 # Number of layers for encoder/decoder
 parser.add_argument('--n-layers-encoder', type=int, default=2)
-parser.add_argument('--n-layers-decoder', type=int, default=3)
+parser.add_argument('--n-layers-decoder', type=int, default=6)
 
 # Spectral embedding dimension
 parser.add_argument('--spectral-emb-dim', type=int, default=20)
@@ -345,6 +345,3 @@ with open("output.csv", "w", newline="") as csvfile:
 
 from Graph_statistics import get_score
 get_score()
-
-#from Graph_statistics import refine_graph
-#refine_graph()

@@ -85,18 +85,17 @@ class Decoder(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_dim, hidden_dim, dropout=0.05):
+    def __init__(self, in_dim, hidden_dim, out_dim, dropout=0.05):
         super(ResidualBlock, self).__init__()
-        self.fc1 = nn.Linear(in_dim + 7, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, in_dim)
+        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, out_dim)
+        self.projection = nn.Linear(in_dim, out_dim)  # Added projection layer for dimension matching
         self.dropout = nn.Dropout(dropout)
-        self.activation = nn.ReLU()
+        self.activation = nn.SiLU()
 
-    def forward(self, x, stats):
-        # x has shape: (batch_size, in_dim)
-        identity = x
-        out = torch.cat((x, stats), dim=-1) 
-        out = self.activation(self.fc1(out))
+    def forward(self, x):
+        identity = self.projection(x)  # Project identity to match dimensions
+        out = self.activation(self.fc1(x))
         out = self.dropout(out)
         out = self.fc2(out)
         return self.activation(out + identity)  # skip connection + activation
@@ -114,14 +113,21 @@ class FastDecoder(nn.Module):
 
         self.input_fc = nn.Linear(latent_dim + 7, hidden_dim)
 
+        dims = [hidden_dim * (2 ** i) for i in range(n_layers - 1)]
+
+        # Residual blocks with increasing sizes
         self.res_blocks = nn.ModuleList([
-            ResidualBlock(hidden_dim, hidden_dim, dropout=dropout)
-            for _ in range(n_layers - 2)
+            ResidualBlock(
+                in_dim=dims[i],
+                hidden_dim=dims[i] * 2,  # Hidden dim is twice the input
+                out_dim=dims[i + 1],  # Output dim matches next block's input
+                dropout=dropout
+            )
+            for i in range(n_layers - 2)
         ])
 
-        self.output_fc = nn.Linear(
-            hidden_dim, 2 * n_nodes * (n_nodes - 1) // 2
-        )
+        final_dim = hidden_dim * (2 ** (n_layers - 2))
+        self.output_fc = nn.Linear(final_dim, 2 * n_nodes * (n_nodes - 1) // 2)
 
     def forward(self, x, stats):
 
@@ -129,7 +135,7 @@ class FastDecoder(nn.Module):
         x = F.relu(self.input_fc(x))                   
 
         for block in self.res_blocks:
-            x = block(x, stats)                       
+            x = block(x)                       
 
         x = self.output_fc(x)                       
         # Reshape to (batch_size, num_edges, 2)
