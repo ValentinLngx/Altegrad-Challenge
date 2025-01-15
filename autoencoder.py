@@ -380,6 +380,7 @@ class GIN(torch.nn.Module):
         return out"""
 
 
+
 class GatedResidualMLP(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim, dropout=0.2):
         super().__init__()
@@ -397,38 +398,10 @@ class GatedResidualMLP(nn.Module):
         return x
 
 
-class JumpingKnowledgeAttn(nn.Module):
-    def __init__(self, hidden_dim, num_layers):
-        super().__init__()
-        self.att_weight = nn.Parameter(torch.randn(num_layers, hidden_dim))
-
-    def forward(self, hidden_states):
-        x_all = torch.stack(hidden_states, dim=0)
-        scores = torch.mean(x_all * self.att_weight.unsqueeze(1), dim=-1)
-        alpha = F.softmax(scores, dim=0)
-        x = (x_all * alpha.unsqueeze(-1)).sum(dim=0)
-        return x
-
-
-class VirtualNode(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers):
-        super().__init__()
-        self.vnode_proj = nn.Linear(input_dim, hidden_dim)
-
-    def forward(self, x, batch, layer_idx):
-        vn_embedding = global_mean_pool(x, batch)
-        vn_embedding = self.vnode_proj(vn_embedding)
-        x = x + vn_embedding[batch]
-        return x, vn_embedding
-
-
 class EnhancedGIN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, latent_dim, n_layers_enc, dropout=0.2,
-                 virtual_node=False, aggregator_type="sum", jk_mode="attention", use_vae=False):
+    def __init__(self, input_dim, hidden_dim, latent_dim, n_layers_enc, dropout=0.2, use_vae=False):
         super().__init__()
         self.n_layers = n_layers_enc
-        self.virtual_node = virtual_node
-        self.jk_mode = jk_mode
         self.use_vae = use_vae
         self.hidden_dim = hidden_dim
         self.dropout = dropout
@@ -437,7 +410,7 @@ class EnhancedGIN(nn.Module):
 
         def build_conv(in_dim, out_dim):
             mlp = GatedResidualMLP(in_dim, out_dim, hidden_dim, dropout)
-            return GINConv(nn=mlp, train_eps=True, aggr=aggregator_type)
+            return GINConv(nn=mlp, train_eps=True, aggr="sum")
 
         self.convs = nn.ModuleList()
         self.batch_norms = nn.ModuleList()
@@ -449,21 +422,6 @@ class EnhancedGIN(nn.Module):
             self.convs.append(build_conv(hidden_dim, hidden_dim))
             self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
 
-        if virtual_node:
-            self.virtualnode = VirtualNode(hidden_dim, hidden_dim, self.n_layers)
-        else:
-            self.virtualnode = None
-
-        if jk_mode == "attention":
-            self.jump = JumpingKnowledgeAttn(hidden_dim, self.n_layers)
-        elif jk_mode == "weighted_sum":
-            self.jump_weights = nn.Parameter(torch.ones(self.n_layers))
-            self.jump = None
-        else:
-            self.jump = None
-
-        self.pool_weight = nn.Parameter(torch.ones(3))
-
         out_dim = 2 * latent_dim if use_vae else latent_dim
         self.fc1 = nn.Linear(hidden_dim, hidden_dim)
         self.layer_norm = nn.LayerNorm(hidden_dim)
@@ -473,32 +431,13 @@ class EnhancedGIN(nn.Module):
         x, edge_index, batch = data.x, data.edge_index, data.batch
         x = self.input_bn(x)
 
-        hidden_states = []
-
-        for layer_idx, (conv, bn) in enumerate(zip(self.convs, self.batch_norms)):
-            if self.virtual_node:
-                x, vn_embedding = self.virtualnode(x, batch, layer_idx)
-
+        for conv, bn in zip(self.convs, self.batch_norms):
             x = conv(x, edge_index)
             x = bn(x)
             x = F.gelu(x)
             x = F.dropout(x, self.dropout, training=self.training)
 
-            hidden_states.append(x)
-
-        if self.jk_mode == "attention":
-            x = self.jump(hidden_states)
-        elif self.jk_mode == "weighted_sum":
-            weights = F.softmax(self.jump_weights, dim=0)
-            x = sum(w * h for w, h in zip(weights, hidden_states))
-        else:
-            x = hidden_states[-1]
-
-        pool_weights = F.softmax(self.pool_weight, dim=0)
-        pooled = (global_add_pool(x, batch) * pool_weights[0] +
-                  global_mean_pool(x, batch) * pool_weights[1] +
-                  global_max_pool(x, batch) * pool_weights[2])
-
+        pooled = global_mean_pool(x, batch)
         out = self.fc1(pooled)
         out = self.layer_norm(out)
         out = F.gelu(out)
@@ -520,7 +459,7 @@ class VariationalAutoEncoder(nn.Module):
         self.n_max_nodes = n_max_nodes
         self.input_dim = input_dim
 
-        self.encoder = EnhancedGIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc, use_vae=False)
+        self.encoder = EnhancedGIN(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc, use_vae=True)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
 
@@ -528,22 +467,14 @@ class VariationalAutoEncoder(nn.Module):
                                    n_layers=n_layers_dec, n_nodes=n_max_nodes)
 
     def forward(self, data, stats):
-        x_g = self.encoder(data)
-        mu = self.fc_mu(x_g)
-        logvar = self.fc_logvar(x_g)
+        mu, logvar = self.encoder(data)
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
 
-        # 🔥 FIX: Apply sigmoid **INSIDE the decoder**
+        # ✅ Apply sigmoid to bound adjacency values
         adj = torch.sigmoid(adj)
 
         return adj
-
-    def encode(self, data):
-        x_g = self.encoder(data)
-        mu = self.fc_mu(x_g)
-        logvar = self.fc_logvar(x_g)
-        return self.reparameterize(mu, logvar)
 
     def reparameterize(self, mu, logvar):
         std = (0.5 * logvar).exp()
@@ -551,19 +482,28 @@ class VariationalAutoEncoder(nn.Module):
         return eps * std + mu
 
     def loss_function(self, data, stats, beta=0.05):
-        x_g = self.encoder(data)
-        mu = self.fc_mu(x_g)
-        logvar = self.fc_logvar(x_g)
+        mu, logvar = self.encoder(data)
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
 
-        # 🔥 FIX: Sigmoid before computing loss
+        # ✅ Apply sigmoid before computing loss
         adj = torch.sigmoid(adj)
 
-        recon = F.l1_loss(adj, data.A, reduction="mean")
+        # ✅ Shape Debugging
+        print(f"DEBUG: adj.shape = {adj.shape}, data.A.shape = {data.A.shape}")
 
-        # 🔥 FIX: Use `mean()` instead of `sum()`
+        # ✅ Prevent exploding values
+        print(f"DEBUG: adj min/max: {adj.min().item()} / {adj.max().item()}")
+
+        # ✅ Reconstruction Loss
+        recon = F.mse_loss(adj, data.A, reduction="mean")  # 🔥 Use MSE instead of L1 (safer)
+
+        # ✅ KL-Divergence (scaled properly)
         kld = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
 
         loss = recon + beta * kld
+
+        # ✅ Debug loss values
+        print(f"DEBUG: recon loss = {recon.item()}, kld loss = {kld.item()}, total loss = {loss.item()}")
+
         return loss, recon, kld
