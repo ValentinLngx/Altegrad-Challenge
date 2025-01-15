@@ -593,9 +593,10 @@ class EnhancedGIN(nn.Module):
         for layer_idx, (conv, bn) in enumerate(zip(self.convs, self.batch_norms)):
             # Optional Virtual Node update (before or after conv, can experiment)
             if self.virtual_node:
+                x = conv(x, edge_index)  # Now x is (N, 64)
                 x, vn_embedding = self.virtualnode(x, batch, layer_idx)
 
-            x = conv(x, edge_index)
+            #x = conv(x, edge_index)
             x = bn(x)
             x = F.gelu(x)
             x = F.dropout(x, self.dropout, training=self.training)
