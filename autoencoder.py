@@ -499,12 +499,12 @@ class EnhancedGIN(nn.Module):
         self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
 
         # Hidden layers: (hidden_dim -> hidden_dim)
-        for _ in range(n_layers - 1):
+        for _ in range(self.n_layers - 1):
             self.convs.append(build_conv(hidden_dim, hidden_dim))
             self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
 
         if virtual_node:
-            self.virtualnode = VirtualNode(hidden_dim, n_layers)
+            self.virtualnode = VirtualNode(hidden_dim, self.n_layers)
         else:
             self.virtualnode = None
 
@@ -513,10 +513,10 @@ class EnhancedGIN(nn.Module):
         ######################################################################
         if jk_mode == "attention":
             # Make sure your JumpingKnowledgeAttn returns [N, hidden_dim]
-            self.jump = JumpingKnowledgeAttn(hidden_dim, n_layers)
+            self.jump = JumpingKnowledgeAttn(hidden_dim, self.n_layers)
         elif jk_mode == "weighted_sum":
             # Weighted sum across layers
-            self.jump_weights = nn.Parameter(torch.ones(n_layers))
+            self.jump_weights = nn.Parameter(torch.ones(self.n_layers))
             self.jump = None
         else:
             # 'last' or other simpler modes
