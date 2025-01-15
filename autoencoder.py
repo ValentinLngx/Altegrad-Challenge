@@ -380,7 +380,6 @@ class GIN(torch.nn.Module):
         return out"""
 
 
-
 class GatedResidualMLP(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim, dropout=0.2):
         super().__init__()
@@ -471,7 +470,7 @@ class VariationalAutoEncoder(nn.Module):
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
 
-        # ✅ Apply sigmoid to bound adjacency values
+        # Apply sigmoid to bound adjacency values
         adj = torch.sigmoid(adj)
 
         return adj
@@ -486,24 +485,15 @@ class VariationalAutoEncoder(nn.Module):
         x_g = self.reparameterize(mu, logvar)
         adj = self.decoder(x_g, stats)
 
-        # ✅ Apply sigmoid before computing loss
+        # Apply sigmoid before computing loss
         adj = torch.sigmoid(adj)
 
-        # ✅ Shape Debugging
-        print(f"DEBUG: adj.shape = {adj.shape}, data.A.shape = {data.A.shape}")
+        # Reconstruction Loss (MSE is safer than L1)
+        recon = F.mse_loss(adj, data.A, reduction="mean")
 
-        # ✅ Prevent exploding values
-        print(f"DEBUG: adj min/max: {adj.min().item()} / {adj.max().item()}")
-
-        # ✅ Reconstruction Loss
-        recon = F.mse_loss(adj, data.A, reduction="mean")  # 🔥 Use MSE instead of L1 (safer)
-
-        # ✅ KL-Divergence (scaled properly)
+        # KL-Divergence
         kld = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
 
         loss = recon + beta * kld
-
-        # ✅ Debug loss values
-        print(f"DEBUG: recon loss = {recon.item()}, kld loss = {kld.item()}, total loss = {loss.item()}")
 
         return loss, recon, kld
